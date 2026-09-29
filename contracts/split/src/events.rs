@@ -2344,3 +2344,149 @@ pub fn payment_confirmed(env: &Env, invoice_id: u64, payer: &Address, amount: i1
         (payer.clone(), amount),
     );
 }
+
+/// Issue #872: Emitted when an invoice pricing model is configured.
+/// Topics: (split, prx_set, invoice_id)
+/// Data: (base_price, tier_count, event_seq)
+pub fn pricing_model_set(env: &Env, invoice_id: u64, base_price: i128, tier_count: u32) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("prx_set"), invoice_id),
+        (base_price, tier_count, event_seq),
+    );
+}
+
+/// Issue #872: Emitted when surge pricing is toggled.
+/// Topics: (split, prx_srg, invoice_id)
+/// Data: (active, event_seq)
+pub fn pricing_surge_toggled(env: &Env, invoice_id: u64, active: bool) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("prx_srg"), invoice_id),
+        (active, event_seq),
+    );
+}
+
+/// Issue #870: Emitted when a recipient delegation is set.
+/// Topics: (split, dlg_set, invoice_id)
+/// Data: (recipient, delegate, expires_at, event_seq)
+pub fn recipient_delegation_set(
+    env: &Env,
+    invoice_id: u64,
+    recipient: &Address,
+    delegate: &Address,
+    expires_at: &Option<u64>,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("dlg_set"), invoice_id),
+        (recipient.clone(), delegate.clone(), expires_at.clone(), event_seq),
+    );
+}
+
+/// Issue #870: Emitted when a recipient delegation is revoked.
+/// Topics: (split, dlg_rev, invoice_id)
+/// Data: (recipient, event_seq)
+pub fn recipient_delegation_revoked(env: &Env, invoice_id: u64, recipient: &Address) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("dlg_rev"), invoice_id),
+        (recipient.clone(), event_seq),
+    );
+}
+
+/// Issue #870: Emitted when recipient performance stats are updated.
+/// Topics: (split, rcp_perf)
+/// Data: (recipient, invoices_released, total_received)
+pub fn recipient_performance_updated(
+    env: &Env,
+    recipient: &Address,
+    invoices_released: u32,
+    total_received: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rcp_perf")),
+        (recipient.clone(), invoices_released, total_received),
+    );
+}
+
+/// Issue #871: Emitted when an invoice time-lock is set.
+/// Topics: (split, tl_set, invoice_id)
+/// Data: (unlock_at, lock_payments, lock_release, lock_refund, event_seq)
+pub fn timelock_set(
+    env: &Env,
+    invoice_id: u64,
+    unlock_at: u64,
+    lock_payments: bool,
+    lock_release: bool,
+    lock_refund: bool,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("tl_set"), invoice_id),
+        (unlock_at, lock_payments, lock_release, lock_refund, event_seq),
+    );
+}
+
+/// Issue #871: Emitted when an invoice time-lock is removed.
+/// Topics: (split, tl_rem, invoice_id)
+/// Data: event_seq
+pub fn timelock_removed(env: &Env, invoice_id: u64) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("tl_rem"), invoice_id),
+        event_seq,
+    );
+}
+
+/// Issue #869: Emitted when a redemption token is issued.
+/// Topics: (split, rdm_iss, invoice_id)
+/// Data: (token_id, holder, claim_amount, expires_at, event_seq)
+pub fn redemption_token_issued(
+    env: &Env,
+    invoice_id: u64,
+    token_id: u64,
+    holder: &Address,
+    claim_amount: i128,
+    expires_at: &Option<u64>,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rdm_iss"), invoice_id),
+        (token_id, holder.clone(), claim_amount, expires_at.clone(), event_seq),
+    );
+}
+
+/// Issue #869: Emitted when a redemption token is transferred to a new holder.
+/// Topics: (split, rdm_xfr, invoice_id)
+/// Data: (token_id, from, to, event_seq)
+pub fn redemption_token_transferred(
+    env: &Env,
+    invoice_id: u64,
+    token_id: u64,
+    from: &Address,
+    to: &Address,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rdm_xfr"), invoice_id),
+        (token_id, from.clone(), to.clone(), event_seq),
+    );
+}
+
+/// Issue #869: Emitted when a redemption token is redeemed.
+/// Topics: (split, rdm_use, invoice_id)
+/// Data: (token_id, holder, claim_amount, event_seq)
+pub fn redemption_token_redeemed(
+    env: &Env,
+    invoice_id: u64,
+    token_id: u64,
+    holder: &Address,
+    claim_amount: i128,
+) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rdm_use"), invoice_id),
+        (token_id, holder.clone(), claim_amount, event_seq),
+    );
+}

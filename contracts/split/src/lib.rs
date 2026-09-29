@@ -94,6 +94,11 @@ mod ext_test_util;
 
 mod invoice_ops;
 
+mod pricing_ext;
+mod recipient_delegation_ext;
+mod timelock_ext;
+mod redemption_ext;
+
 use error::ContractError;
 use validation::assert_valid_bps;
 use calc::{calc_platform_fee, funding_bps};
@@ -131,6 +136,14 @@ use types::{
     Note,
     // Issue #758
     Subscription,
+    // Issue #872
+    InvoicePriceTier, InvoicePricingModel,
+    // Issue #870
+    RecipientDelegation, RecipientPerformance,
+    // Issue #871
+    InvoiceTimeLock,
+    // Issue #869
+    RedemptionToken,
 };
 
 // ---------------------------------------------------------------------------

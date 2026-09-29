@@ -2229,3 +2229,88 @@ pub struct Subscription {
     /// Whether the subscription is currently paused.
     pub paused: bool,
 }
+
+/// Issue #872: Price tier for volume-based invoice pricing.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoicePriceTier {
+    /// Minimum invoice amount to qualify for this tier.
+    pub min_amount: i128,
+    /// Discount in basis points (e.g. 500 = 5% discount).
+    pub discount_bps: u32,
+}
+
+/// Issue #872: Advanced pricing model for an invoice.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoicePricingModel {
+    /// Base price in token units.
+    pub base_price: i128,
+    /// Volume-based discount tiers (sorted ascending by min_amount).
+    pub tiers: Vec<InvoicePriceTier>,
+    /// Optional surge multiplier in basis points (10_000 = 1x, 15_000 = 1.5x).
+    pub surge_bps: u32,
+    /// Whether surge pricing is currently active.
+    pub surge_active: bool,
+}
+
+/// Issue #870: Delegation record for a recipient's payout address.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecipientDelegation {
+    /// The address that will receive the payout on behalf of the original recipient.
+    pub delegate: Address,
+    /// Ledger timestamp when delegation was set.
+    pub set_at: u64,
+    /// Optional expiry timestamp; delegation expires after this time.
+    pub expires_at: Option<u64>,
+}
+
+/// Issue #870: Performance tracking for a recipient across invoices.
+#[contracttype]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecipientPerformance {
+    /// Total number of invoices where this recipient was listed.
+    pub invoices_listed: u32,
+    /// Total amount received across all released invoices.
+    pub total_received: i128,
+    /// Number of invoices that were released (funded fully).
+    pub invoices_released: u32,
+    /// Number of invoices that were refunded (deadline missed).
+    pub invoices_refunded: u32,
+}
+
+/// Issue #871: Configuration for an invoice time-lock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceTimeLock {
+    /// Unix timestamp after which the locked actions are permitted.
+    pub unlock_at: u64,
+    /// Whether payments are blocked until unlock_at.
+    pub lock_payments: bool,
+    /// Whether release is blocked until unlock_at.
+    pub lock_release: bool,
+    /// Whether refund is blocked until unlock_at.
+    pub lock_refund: bool,
+    /// Who set the lock.
+    pub set_by: Address,
+}
+
+/// Issue #869: A redemption token representing a claim on an invoice's
+/// funded amount, usable in secondary markets.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RedemptionToken {
+    /// The invoice this token is tied to.
+    pub invoice_id: u64,
+    /// The address that currently holds this redemption right.
+    pub holder: Address,
+    /// The amount of the invoice's funded pool this token represents.
+    pub claim_amount: i128,
+    /// Whether this token has been redeemed.
+    pub redeemed: bool,
+    /// Ledger timestamp when the token was issued.
+    pub issued_at: u64,
+    /// Optional expiry timestamp after which the token cannot be redeemed.
+    pub expires_at: Option<u64>,
+}
