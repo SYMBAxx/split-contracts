@@ -118,4 +118,7 @@ pub enum ContractError {
     RecipientNotFound = 62,
     /// Issue #522: Parent chain depth exceeds the allowed maximum.
     ParentChainTooDeep = 63,
+    /// Issue #837: Invoice is locked (deadline passed or explicitly locked)
+    /// and can no longer be modified.
+    InvoiceLocked = 64,
 }

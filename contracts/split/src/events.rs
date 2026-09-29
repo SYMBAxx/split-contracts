@@ -1664,3 +1664,127 @@ pub fn recipient_share_unlocked(
         (recipient.clone(), admin.clone()),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #837: Invoice locking
+// ---------------------------------------------------------------------------
+
+/// Emitted when an invoice is locked against further modification.
+/// Topics: (split, inv_lock, invoice_id)
+/// Data: (locked_by, locked_at, deadline, event_seq)
+pub fn invoice_locked(env: &Env, invoice_id: u64, locked_by: &Address, locked_at: u64, deadline: u64) {
+    let event_seq = next_seq(env, invoice_id);
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("inv_lock"), invoice_id),
+        (locked_by.clone(), locked_at, deadline, event_seq),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #838: Creator reputation recovery
+// ---------------------------------------------------------------------------
+
+/// Emitted when a creator files an appeal against a payer's rating.
+/// Topics: (split, rt_appl, invoice_id)
+/// Data: (creator, payer, score, reason_hash)
+pub fn rating_appealed(
+    env: &Env,
+    invoice_id: u64,
+    creator: &Address,
+    payer: &Address,
+    score: u32,
+    reason_hash: &BytesN<32>,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rt_appl"), invoice_id),
+        (creator.clone(), payer.clone(), score, reason_hash.clone()),
+    );
+}
+
+/// Emitted when an admin resolves a rating appeal.
+/// Topics: (split, rt_resol, invoice_id)
+/// Data: (payer, admin, upheld, creator_sum, creator_count)
+pub fn rating_appeal_resolved(
+    env: &Env,
+    invoice_id: u64,
+    payer: &Address,
+    admin: &Address,
+    upheld: bool,
+    creator_rating: (u32, u32),
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rt_resol"), invoice_id),
+        (payer.clone(), admin.clone(), upheld, creator_rating.0, creator_rating.1),
+    );
+}
+
+/// Emitted when a creator withdraws a pending rating appeal.
+/// Topics: (split, rt_wdrw, invoice_id)
+/// Data: (creator, payer)
+pub fn rating_appeal_withdrawn(env: &Env, invoice_id: u64, creator: &Address, payer: &Address) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("rt_wdrw"), invoice_id),
+        (creator.clone(), payer.clone()),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #839: Payment streams and stream aggregation
+// ---------------------------------------------------------------------------
+
+/// Emitted when a payment stream is created.
+/// Topics: (split, strm_new, stream_id)
+/// Data: (sender, recipient, token, deposit, rate_per_ledger, start_ledger)
+pub fn stream_created(
+    env: &Env,
+    stream_id: u64,
+    sender: &Address,
+    recipient: &Address,
+    token: &Address,
+    deposit: i128,
+    rate_per_ledger: i128,
+    start_ledger: u32,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("strm_new"), stream_id),
+        (sender.clone(), recipient.clone(), token.clone(), deposit, rate_per_ledger, start_ledger),
+    );
+}
+
+/// Emitted when a recipient withdraws accrued funds from a stream.
+/// Topics: (split, strm_wd, stream_id)
+/// Data: (recipient, amount, total_withdrawn)
+pub fn stream_withdrawn(env: &Env, stream_id: u64, recipient: &Address, amount: i128, total_withdrawn: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("strm_wd"), stream_id),
+        (recipient.clone(), amount, total_withdrawn),
+    );
+}
+
+/// Emitted once per source stream folded into an aggregate stream.
+/// Topics: (split, strm_mrg, source_id)
+/// Data: (target_id, settled_to_recipient, remaining_carried)
+pub fn stream_merged(env: &Env, source_id: u64, target_id: u64, settled: i128, carried: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("strm_mrg"), source_id),
+        (target_id, settled, carried),
+    );
+}
+
+/// Emitted when multiple streams are combined into one.
+/// Topics: (split, strm_agg, new_stream_id)
+/// Data: (sender, recipient, source_ids, deposit, rate_per_ledger)
+pub fn streams_aggregated(
+    env: &Env,
+    new_stream_id: u64,
+    sender: &Address,
+    recipient: &Address,
+    source_ids: &Vec<u64>,
+    deposit: i128,
+    rate_per_ledger: i128,
+) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("strm_agg"), new_stream_id),
+        (sender.clone(), recipient.clone(), source_ids.clone(), deposit, rate_per_ledger),
+    );
+}

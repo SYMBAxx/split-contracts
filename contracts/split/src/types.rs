@@ -1666,3 +1666,57 @@ pub struct RecipientShare {
     pub locked: bool,
 }
 
+
+/// Issue #837: Record written when an invoice is locked against further
+/// modification. Once present, all creator-side mutators reject the invoice.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvoiceLock {
+    pub invoice_id: u64,
+    pub locked_by: Address,
+    pub locked_at: u64,
+    pub locked_ledger: u32,
+}
+
+/// Issue #838: Lifecycle state of a creator's appeal against a rating.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppealStatus {
+    Pending,
+    Upheld,
+    Rejected,
+}
+
+/// Issue #838: A creator's appeal contesting a low rating left by a payer.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingAppeal {
+    pub invoice_id: u64,
+    pub payer: Address,
+    pub creator: Address,
+    pub score: u32,
+    pub reason_hash: BytesN<32>,
+    pub status: AppealStatus,
+    pub filed_at: u64,
+    pub resolved_at: u64,
+    pub resolved_by: Option<Address>,
+}
+
+/// Issue #839: A linear payment stream funded up-front by `sender` and
+/// accruing to `recipient` at `rate_per_ledger` from `start_ledger` until
+/// `deposit` is exhausted.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaymentStream {
+    pub id: u64,
+    pub sender: Address,
+    pub recipient: Address,
+    pub token: Address,
+    pub deposit: i128,
+    pub rate_per_ledger: i128,
+    pub start_ledger: u32,
+    pub withdrawn: i128,
+    pub active: bool,
+    /// Set when this stream was folded into another via `aggregate_streams`.
+    pub aggregated_into: Option<u64>,
+}
