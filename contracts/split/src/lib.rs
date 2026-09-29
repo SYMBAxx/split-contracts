@@ -97,6 +97,10 @@ mod hold_ext;
 mod freeze_ext;
 mod treasury_multi_ext;
 mod velocity_ext;
+mod payer_tier_ext;
+mod payment_pool_ext;
+mod payer_feedback_ext;
+mod export_validation_ext;
 #[cfg(test)]
 mod ext_test_util;
 
@@ -15932,6 +15936,7 @@ impl SplitContract {
             .instance()
             .get(&invoice_rate_limit_max_key())
             .unwrap_or(0u32);
+        let max_payments = payer_tier_ext::max_payments_for(env, payer, max_payments);
         if window_ledgers == 0 || max_payments == 0 {
             return;
         }
@@ -15967,6 +15972,7 @@ impl SplitContract {
             .instance()
             .get(&invoice_rate_limit_max_key())
             .unwrap_or(0u32);
+        let max_payments = payer_tier_ext::max_payments_for(env, payer, max_payments);
         if window_ledgers == 0 || max_payments == 0 {
             return;
         }
