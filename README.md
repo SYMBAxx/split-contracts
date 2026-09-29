@@ -1,4 +1,7 @@
-# split-contracts
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Stellar-split/.github/main/assets/stellarsplit-mark.svg" alt="StellarSplit" width="80" />
+  <h1>split-contracts</h1>
+</div>
 
 ![Rust](https://img.shields.io/badge/Rust-1.84+-orange?logo=rust)
 ![Soroban SDK](https://img.shields.io/badge/soroban--sdk-22.0.0-blueviolet)
@@ -109,6 +112,29 @@ Returns the full invoice struct.
 ```
 PLACEHOLDER — update after deployment
 ```
+
+## Storage Key Registry
+
+Every storage key the contract uses is serialised to XDR and compared against a committed baseline in `tests/snapshots/storage_keys.json`. The snapshot runs as `cargo test -p split storage_snapshot`.
+
+**Policy:**
+- Adding, removing, or changing any storage key will intentionally fail the snapshot test.
+- If the change is intentional (e.g. a new feature adds a key, or a migration renames an existing one), update the baseline file by running the test locally, copying the generated XDR into `tests/snapshots/storage_keys.json`, and **including a migration note in the PR description**.
+- The test also asserts that **no two keys produce the same XDR** (collision-free).
+- Each key entry in the snapshot is labelled by its Rust function name (e.g. `invoice_key`, `rep_key`).
+
+To update the baseline:
+```bash
+cargo test -p split storage_snapshot 2>&1 | grep -A 999 "EXPECTED (generated)" | tail -n +2 | head -n -1 > tests/snapshots/storage_keys.json
+```
+
+### Per-operation layout snapshots
+
+`op_snapshot.rs` runs `create_invoice`, `pay`, `release`, `refund`, `cancel_invoice`, `add_recipient` and `clone_invoice`, then records which storage keys exist afterwards as sorted JSON in `tests/snapshots/ops_<op>.json`. The test fails on any difference. To regenerate after an intentional change (libtest has no `--update-snapshots` flag, so an env var is used):
+```bash
+UPDATE_SNAPSHOTS=1 cargo test -p split op_snapshot
+```
+Missing snapshot files are created on first run. Keys added by other modules must be added to the probe list in `layout()`.
 
 ## Contributing via Drips Wave
 

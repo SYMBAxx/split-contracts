@@ -1,4 +1,216 @@
-use soroban_sdk::{contracttype, Address, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+
+/// Total basis points representing 100% — ratio vecs must sum to exactly this value.
+pub const BASIS_POINTS_TOTAL: u32 = 10_000;
+
+/// (base, quote) asset pair for oracle-priced invoices.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AssetPair {
+    pub base: Symbol,
+    pub quote: Symbol,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OverflowBehavior {
+    /// Reject the payment outright. The payer receives an error and the
+    /// transaction does not credit the invoice.
+    Reject,
+    /// Accept the full payment and mark the surplus for refund to the payer
+    /// at release time.
+    Refund,
+    /// Accept the full payment and treat the surplus as a protocol donation;
+    /// no refund is issued.
+    Donate,
+}
+
+/// Issue #420: creator-configurable behaviour when a payment would push an
+/// invoice's `funded` total past its target.
+///
+/// This is the authority for overfunding decisions in `_pay`. `Cap` — the
+/// default, and the value legacy invoices are migrated to — preserves the
+/// historical behaviour by delegating to the per-invoice [`OverflowBehavior`]
+/// setting, so invoices created before this field existed are unaffected.
+///
+/// # Relationship
+///
+/// `OverfundingPolicy` is the *outer* policy selector stored on the invoice.
+/// When it is `Cap`, the contract falls back to the per-invoice
+/// [`OverflowBehavior`] value to decide the exact outcome. The other two
+/// variants (`AcceptAll`, `ReturnSurplus`) bypass `OverflowBehavior` entirely
+/// and implement their own semantics directly in `_pay`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OverfundingPolicy {
+    /// Preserve legacy behaviour by delegating to the invoice's
+    /// [`OverflowBehavior`] field.
+    Cap,
+    /// Accept the payment in full; `funded` is allowed to exceed the total and
+    /// the surplus is distributed pro-rata to recipients at release time.
+    AcceptAll,
+    /// Accept only the portion that fits under the total and immediately
+    /// transfer the remainder back to the payer.
+    ReturnSurplus,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CloneOverrides {
+    pub new_deadline: Option<u64>,
+    pub new_amounts: Option<Vec<i128>>,
+    pub new_recipients: Option<Vec<Address>>,
+    pub new_overflow_behavior: Option<Symbol>,
+    /// New off-chain metadata hash (IPFS CID / SHA-256) for the cloned invoice.
+    pub new_metadata_hash: Option<BytesN<32>>,
+}
+
+/// Issue: Split rule for a single recipient — evaluated at release time.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum SplitRule {
+    /// Pay this exact amount regardless of the invoice's funded total.
+    ///
+    /// # Example
+    ///
+    /// `Fixed(2_500)` always pays out `2_500`, whether `funded` is `2_500`,
+    /// `10_000`, or anything else.
+    Fixed(i128),
+    /// Pay `funded * bps / 10_000` to the recipient, where `bps` is basis
+    /// points (10_000 = 100%).
+    ///
+    /// # Example
+    ///
+    /// `Percentage(3_000)` (30%) on `funded = 10_000` yields
+    /// `10_000 * 3_000 / 10_000 = 3_000`.
+    Percentage(u32),
+    /// Pay `funded * bps / 10_000` only once `funded` strictly exceeds
+    /// `threshold`; otherwise pay `0`. Encoded as `(threshold, bps)`.
+    ///
+    /// # Example
+    ///
+    /// `Tiered(5_000, 2_000)` (20% once past 5_000) on `funded = 8_000`
+    /// yields `8_000 * 2_000 / 10_000 = 1_600`, because `8_000 > 5_000`.
+    /// On `funded = 4_000` it yields `0`, because `4_000 <= 5_000`.
+    Tiered(i128, u32),
+}
+
+/// Issue: Action taken by an auto-resolve rule.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResolveAction {
+    Release,
+    Refund,
+}
+
+/// Issue: Auto-resolve rule — if funded/total >= min_funded_bps/10_000, execute action.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ResolveRule {
+    /// Minimum funding threshold in basis points (e.g. 5000 = 50%).
+    pub min_funded_bps: u32,
+    pub action: ResolveAction,
+}
+
+/// Issue #285: Volume-based fee tier for creators.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeTier {
+    /// Minimum creator lifetime volume threshold to qualify for this tier.
+    pub volume_threshold: u64,
+    /// Fee in basis points (e.g. 100 = 1%).
+    pub fee_bps: u32,
+}
+
+/// Issue #409: Rebate tier for high-volume creators.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RebateTier {
+    pub min_volume: i128,
+    pub rebate_bps: u32,
+}
+
+/// Issue #815: Filtered creator earnings aggregate returned by
+/// `get_creator_earnings`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreatorEarnings {
+    /// Number of matching invoices in the scanned range.
+    pub invoice_count: u32,
+    /// Sum of the target amounts of matching invoices.
+    pub total_amount: i128,
+    /// Sum of the funded amounts of matching invoices.
+    pub total_funded: i128,
+    /// Sum of funded amounts on matching Released invoices.
+    pub total_released: i128,
+}
+
+/// Issue #299: Per-creator analytics aggregator.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CreatorStats {
+    /// Total number of invoices created.
+    pub total_invoices: u32,
+    /// Total amount raised across all invoices.
+    pub total_raised: u64,
+    /// Total amount released to recipients.
+    pub total_released: u64,
+    /// Total number of unique payers.
+    pub total_payers: u32,
+    /// Average funding time in ledgers (running average).
+    pub avg_funding_time_ledgers: u32,
+    /// Total number of refunded invoices.
+    pub total_refunded: u32,
+}
+
+/// Issue #: A single (invoice_id, amount) pair for pool_pay.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoicePayment {
+    pub invoice_id: u64,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Bid {
+    pub bidder: Address,
+    pub amount: i128,
+}
+
+/// Issue #824: Explicit creator commission tier, assigned directly by an
+/// admin. Distinct from the volume-based [`FeeTier`] system, which derives a
+/// fee automatically from a creator's lifetime volume — `CreatorTier` lets an
+/// admin grant a specific commission rate regardless of volume (e.g. for
+/// partners or promotional arrangements).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum CreatorTier {
+    Bronze,
+    Silver,
+    Gold,
+    Platinum,
+}
+
+/// Issue #826: A single payer-signed payment instruction used for batch
+/// signature verification ahead of relayed / meta-transaction multi-pay
+/// flows. The signature is an Ed25519 signature (produced off-chain by
+/// `payer`, whose public key is `signer_pubkey`) over the canonical encoding
+/// of `(invoice_id, payer, amount, nonce)`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SignedPayment {
+    pub invoice_id: u64,
+    pub payer: Address,
+    pub amount: i128,
+    pub nonce: u64,
+    pub signer_pubkey: BytesN<32>,
+    pub signature: BytesN<64>,
+}
+
+// ---------------------------------------------------------------------------
+// Invoice status
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Core invoice types
@@ -8,44 +220,2018 @@ use soroban_sdk::{contracttype, Address, Vec};
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum InvoiceStatus {
-    /// Invoice created, awaiting full payment.
     Pending,
-    /// All shares paid; funds released to recipients.
     Released,
-    /// Deadline passed before full funding; payers refunded.
     Refunded,
+    Expired,
+    Cancelled,
+    Disputed,
+    PartiallyReleased,
+    /// Alias for Released used as the parent-finalisation gate (#522).
+    /// An invoice is considered Finalised once it has been Released.
+    Finalised,
+    /// Soft-deleted invoice — tombstone record preserved for audit trail.
+    Deleted,
+    /// Issue #564: Payout in progress — intermediate state during release_funds.
+    PayoutInProgress,
 }
+
+// ---------------------------------------------------------------------------
+// Payment
+// ---------------------------------------------------------------------------
 
 /// A single payment made toward an invoice.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Payment {
-    /// Address of the payer.
     pub payer: Address,
-    /// Amount paid in stroops (7 decimal places).
     pub amount: i128,
+    pub tip: i128,
+    pub attestation_hash: Option<BytesN<32>>,
+    pub donate_on_failure: bool,
+    pub ledger: u32,
+    pub timestamp: u64,
 }
+
+/// Issue #449: Multi-phase invoice state machine.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum InvoicePhase {
+    Draft,
+    Active,
+    Locked,
+    Released,
+}
+
+/// Issue #447: Per-invoice analytics accumulator.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceAnalytics {
+    pub payment_count: u64,
+    pub total_funded: i128,
+    pub unique_payers: u32,
+    pub first_payment_ledger: u32,
+    pub last_payment_ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AdminRole {
+    SuperAdmin,
+    Operator,
+}
+
+/// Issue RBAC: Fine-grained role assigned to an address.
+/// - Admin    : may perform any action (equivalent to SuperAdmin for RBAC gates).
+/// - Creator  : may call `create_invoice`.
+/// - Operator : may call `release` / `release_invoice`.
+/// - Auditor  : read-only; may call `get_invoice` and other query entry points.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Role {
+    Admin,
+    Creator,
+    Operator,
+    Auditor,
+}
+
+/// Category of a token transfer recorded in the audit log.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum TransferKind {
+    /// A payer contributing funds toward an invoice.
+    Contribution,
+    /// Funds released to a recipient.
+    Payout,
+    /// Funds refunded to a payer.
+    Refund,
+    /// A fee charged by the contract.
+    Fee,
+    /// Sweep of remaining funds to a designated address.
+    Sweep,
+}
+
+/// A single token transfer event recorded on-chain.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TransferRecord {
+    /// Source of the transfer.
+    pub from: Address,
+    /// Destination of the transfer.
+    pub to: Address,
+    /// Amount transferred in stroops.
+    pub amount: i128,
+    /// Category of the transfer.
+    pub kind: TransferKind,
+    /// Ledger sequence at the time of the transfer.
+    pub ledger: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Invoice
+// ---------------------------------------------------------------------------
 
 /// An on-chain invoice splitting payment among multiple recipients.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct Invoice {
-    /// Address that created the invoice.
+pub struct AuditEntry {
+    pub action: Symbol,
+    pub actor: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SubscriptionParams {
     pub creator: Address,
-    /// Ordered list of recipient addresses.
     pub recipients: Vec<Address>,
-    /// Amounts owed to each recipient (parallel to `recipients`).
     pub amounts: Vec<i128>,
-    /// USDC token contract address.
+    pub tokens: Vec<Address>,
+    /// Optional recurrence interval in days. Defaults to 30 if None.
+    pub interval_days: Option<u32>,
+}
+
+/// Issue #414: Per-recipient payout configuration.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Recipient {
+    pub address: Address,
     pub token: Address,
-    /// Unix timestamp after which unfunded invoices can be refunded.
-    pub deadline: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CompletionProof {
+    pub id: u64,
+    pub status: InvoiceStatus,
+    pub funded: i128,
+    pub timestamp: u64,
+    pub hash: BytesN<32>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentProof {
+    pub invoice_id: u64,
+    pub payer: Address,
+    pub total_paid: i128,
+    pub proof_hash: BytesN<32>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceTemplate {
+    pub recipients: Vec<Address>,
+    pub amounts: Vec<i128>,
+    pub token: Address,
+    /// Ledger sequence after which the invoice can be refunded.
+    pub deadline_ledger: u32,
     /// Total amount collected so far.
     pub funded: i128,
     /// Current lifecycle status.
     pub status: InvoiceStatus,
     /// All payments made toward this invoice.
     pub payments: Vec<Payment>,
+    /// Optional whitelist of addresses allowed to pay this invoice.
+    /// When None, any address may pay.
+    pub allowed_payers: Option<Vec<Address>>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CreateInvoiceParams {
+    pub recipients: Vec<Address>,
+    pub amounts: Vec<i128>,
+    pub token: Address,
+    pub deadline: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentCommitment {
+    pub commitment_hash: BytesN<32>,
+    pub commit_ledger: u32,
+}
+
+/// A single graduated release tranche: `basis_points` out of 10 000 of the
+/// invoice total becomes releasable once the ledger time reaches `timestamp`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Tranche {
+    pub timestamp: u64,
+    pub basis_points: u32,
+}
+
+/// On-chain reputation scoring metrics for an address (issue #349).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RepScore {
+    pub paid_on_time: u32,
+    pub late_pays: u32,
+    pub invoices_released: u32,
+    pub invoices_refunded: u32,
+}
+
+/// Issue #431: Payment fingerprint for duplicate detection.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentFingerprint {
+    /// Timestamp (ledger sequence) when the payment was recorded.
+    pub recorded_at_ledger: u32,
+    /// Hash of (invoice_id || payer || amount || ledger_sequence).
+    pub fingerprint_hash: BytesN<32>,
+}
+
+/// Optional parameters for `create_invoice`, grouped to keep the function
+/// within Soroban's 10-parameter limit.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceOptions {
+    /// Additional creators who share ownership/rights over the invoice.
+    pub co_creators: Vec<Address>,
+    /// When true, payers may withdraw their contribution before the deadline.
+    pub allow_early_withdrawal: bool,
+    /// Size of the bonus pool funded alongside the invoice, in token units.
+    pub bonus_pool: i128,
+    /// Maximum number of distinct payers that may contribute to the bonus pool.
+    pub bonus_max_payers: u32,
+    /// Optional creator cosigner address that must co-author creator actions.
+    pub creator_cosigner: Option<Address>,
+    /// Velocity limit in token units for a single payer over `velocity_window`.
+    pub velocity_limit: i128,
+    /// Window length in seconds for velocity limiting.
+    pub velocity_window: u64,
+    /// Issue #22: block release until this invoice is Released.
+    pub prerequisite_id: Option<u64>,
+    /// Issue #23: graduated release schedule; empty = release all at once.
+    pub tranches: Vec<Tranche>,
+    /// Co-signers whose approval is required before release.
+    pub co_signers: Vec<Address>,
+    /// How many co-signer approvals are needed (≤ `co_signers.len()`).
+    pub required_signatures: u32,
+    /// Penalty basis points for late payments (issue #42).
+    pub penalty_bps: Option<u32>,
+    /// Soft deadline timestamp; payments after this incur a penalty (issue #42).
+    pub penalty_deadline: Option<u64>,
+    /// Minimum funding threshold in basis points (issue #43).
+    pub min_funding_bps: Option<u32>,
+    /// Issue #86: creator-triggered staged release schedule; each entry is
+    /// basis points (must sum to 10 000 when non-empty).
+    pub release_stages: Vec<u32>,
+    /// Issue #142: optional price oracle contract for dynamic pricing.
+    pub price_oracle: Option<Address>,
+    /// Issue #41: optional preferred output token per recipient for DEX swap on release.
+    pub swap_tokens: Vec<Option<Address>>,
+    pub tax_bps: Option<u32>,
+    pub tax_authority: Option<Address>,
+    pub insurance_premium_bps: Option<u32>,
+    pub smart_route: Option<bool>,
+    pub notification_contract: Option<Address>,
+    pub overflow_behavior: OverflowBehavior,
+    /// Issue #1: when true, _release() registers funds with the stream contract instead of direct transfer.
+    pub convert_to_stream: bool,
+    /// Issue #2: tokens accepted in pay_with_token(); base token is always accepted implicitly.
+    pub accepted_tokens: Vec<Address>,
+    /// Optional automatic forwarding address target for leftover funds.
+    pub forward_to: Option<Address>,
+    /// Optional automatic forwarding to another invoice id.
+    pub forward_invoice_id: Option<u64>,
+    /// Issue: per-recipient split rules evaluated at release time; empty = use amounts[].
+    pub split_rules: Vec<SplitRule>,
+    /// Issue: pre-agreed auto-resolution rules evaluated in order when auto_resolve() is called.
+    pub auto_resolve_rules: Vec<ResolveRule>,
+    /// Optional oracle address that must confirm the condition before release.
+    pub condition_oracle: Option<Address>,
+    /// Optional cross-chain reference carried through invoice creation.
+    pub cross_chain_ref: Option<String>,
+    /// Issue #98: restrict payments to this allowlist; None = open.
+    pub allowed_payers: Option<Vec<Address>>,
+    /// Issue: per-recipient release priorities (parallel to recipients); empty = no ordering.
+    pub priorities: Vec<u32>,
+    /// Issue #199: grace period in seconds after deadline before refund is allowed.
+    pub refund_grace_secs: Option<u64>,
+    /// Scheduled release timestamp (issue #207).
+    pub scheduled_release_at: Option<u64>,
+    /// KYC verification requirement.
+    pub require_kyc: bool,
+    /// Per-recipient split ratios in basis points (must sum to [`BASIS_POINTS_TOTAL`] = 10 000
+    /// when non-empty).  Empty vec means "no ratio constraint — use amounts directly."
+    pub ratios: Vec<u32>,
+    /// Co-signer addresses whose approval (via `approve_release`) is required
+    /// before this invoice can be released. Independent of the legacy
+    /// `co_signers` / `sign_release` gate above. `None` disables the gate.
+    pub cosigners: Option<Vec<Address>>,
+    /// Number of distinct `cosigners` approvals required before release is
+    /// permitted. Only meaningful when `cosigners` is `Some`; must be in
+    /// `1..=cosigners.len()`.
+    pub cosigner_threshold: Option<u32>,
+    /// Overflow fields that would otherwise push this struct past Soroban's
+    /// 40-field `#[contracttype]` limit — see [`InvoiceOptions2`].
+    pub ext: InvoiceOptions2,
+}
+
+/// Overflow options for `create_invoice`, split off from [`InvoiceOptions`] to stay within
+/// Soroban's 40-field `#[contracttype]` limit.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceOptions2 {
+    /// Issue #274: invoice target in USD cents; used with price_oracle for dynamic funding.
+    pub target_usd_cents: Option<u64>,
+    /// Issue #307: explicit payment token override; uses this token instead of the invoice base token.
+    pub payment_token: Option<Address>,
+    /// Issue #327: ledgers to lock funds after full funding (max 100_000 ≈ 5 days).
+    pub release_delay_ledgers: Option<u32>,
+    /// Issue #329: optional IPFS CID / SHA-256 hash of off-chain invoice metadata.
+    pub metadata_hash: Option<BytesN<32>>,
+    /// Per-payer cooldown window in seconds (issue #168).
+    pub payment_cooldown_secs: Option<u64>,
+    /// Maximum payments allowed per window (issue #168).
+    pub max_payments_per_window: Option<u32>,
+    /// Issue #760: ordered milestone list for sequentially-unlocked invoices.
+    /// Max 10 milestones.  When set, payments are only accepted for the
+    /// currently active milestone; calling `complete_milestone` releases the
+    /// active milestone's funds and activates the next one.
+    pub milestone_list: Option<Vec<Milestone>>,
+    /// Window duration in seconds for payment rate limiting (issue #168).
+    pub payment_window_secs: Option<u64>,
+    /// Oracle contract used for oracle-priced invoices: the funding target is
+    /// computed at payment time from a live exchange rate instead of being
+    /// fixed at creation. When set, `oracle_asset_pair` must also be set and
+    /// `amounts` is interpreted as the USD-cents funding target.
+    pub oracle: Option<Address>,
+    /// Base asset symbol passed to the oracle's `price` call (e.g. XLM).
+    pub oracle_asset_pair_base: Option<Symbol>,
+    /// Quote asset symbol passed to the oracle's `price` call (e.g. USD).
+    pub oracle_asset_pair_quote: Option<Symbol>,
+    /// Minimum required payer reputation score to pay this invoice (issue #349).
+    pub min_payer_rep: Option<u32>,
+    /// Issue #430: payments are rejected before this timestamp, if set.
+    pub payment_open_at: Option<u64>,
+    /// Issue #430: payments are rejected after this timestamp, if set.
+    /// Must be strictly before `deadline` when set.
+    pub payment_close_at: Option<u64>,
+    /// Optional milestone thresholds in basis points for auto-release gates.
+    pub milestones: Option<Vec<u32>>,
+    /// Optional per-recipient payout caps parallel to `recipients`.
+    pub recipient_max_payouts: Option<Vec<Option<i128>>>,
+    /// Issue #416: SHA-256 hash of the required off-chain release preimage.
+    pub release_condition_hash: Option<BytesN<32>>,
+    /// Issue #417: enable recipient whitelist enforcement for this invoice.
+    pub recipient_whitelist_enabled: bool,
+    /// Issue #188: escrow hold period in ledgers.
+    pub escrow_hold_period: Option<u32>,
+    /// Issue #420: how overfunding payments are handled. Use `Cap` for the
+    /// historical behaviour. (Not `Option`-wrapped: `#[contracttype]` cannot
+    /// derive the `ScVal` conversions for `Option<CustomEnum>`.)
+    pub overfunding_policy: OverfundingPolicy,
+    /// Issue #489: number of ledgers after creation during which contributions
+    /// qualify for the discounted `early_bird_fee_bps` platform fee. 0 disables
+    /// the early-bird discount entirely.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) applied to contributions made
+    /// within `early_bird_window_ledgers` of invoice creation. Must be ≤ the
+    /// standard platform fee in effect at creation time.
+    pub early_bird_fee_bps: u32,
+    /// Issue #559: creator-declared fee in basis points (0–10 000).
+    /// Deducted from gross collected funds before recipient payouts.
+    pub creator_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
+    /// Issue #518: denominator for high-precision ratio splits.
+    pub ratio_denominator: u64,
+    /// Issue #747: maximum total contribution allowed from any single payer.
+    /// When set, `_pay` panics with `ContributionCapExceeded` if adding the
+    /// new payment would push the payer's running total past this cap.
+    /// `None` (the default) means no per-payer cap is enforced.
+    pub max_contribution_per_payer: Option<i128>,
+}
+
+impl Default for InvoiceOptions2 {
+    /// Returns an `InvoiceOptions2` with every optional field set to `None`,
+    /// every boolean to `false`, every numeric to `0`, and
+    /// `overfunding_policy` to [`OverfundingPolicy::Cap`] (the historical
+    /// behaviour).  `ratio_denominator` is `10_000` to match
+    /// [`InvoiceExt2::default`].
+    ///
+    /// Tests that only care about one or two fields can use this as a
+    /// starting point and override just those fields:
+    /// ```ignore
+    /// let opts = InvoiceOptions2 {
+    ///     payment_cooldown_secs: Some(60),
+    ///     ..Default::default()
+    /// };
+    /// ```
+    fn default() -> Self {
+        InvoiceOptions2 {
+            target_usd_cents: None,
+            payment_token: None,
+            release_delay_ledgers: None,
+            metadata_hash: None,
+            payment_cooldown_secs: None,
+            max_payments_per_window: None,
+            payment_window_secs: None,
+            oracle: None,
+            oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
+            min_payer_rep: None,
+            payment_open_at: None,
+            payment_close_at: None,
+            milestones: None,
+            recipient_max_payouts: None,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
+            escrow_hold_period: None,
+            overfunding_policy: OverfundingPolicy::Cap,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            creator_fee_bps: 0,
+            early_bird_fee_credit: 0,
+            ratio_denominator: 10_000,
+            max_contribution_per_payer: None,
+        }
+    }
+}
+
+/// Legacy invoice layout used by stored invoices created before the `version`
+/// field was added. Kept for on-chain migration so old data can be
+/// deserialised and re-saved in the current schema.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct LegacyInvoice {
+    pub creator: Address,
+    pub co_creators: Vec<Address>,
+    pub recipients: Vec<Address>,
+    pub amounts: Vec<i128>,
+    pub tokens: Vec<Address>,
+    pub deadline: u64,
+    pub funded: i128,
+    pub status: InvoiceStatus,
+    pub payments: Vec<Payment>,
+    pub drip_duration: Option<u64>,
+    pub release_timestamp: Option<u64>,
+    pub claimed: Vec<i128>,
+    pub frozen: bool,
+    pub completion_time: Option<u64>,
+    pub allow_early_withdrawal: bool,
+    pub bonus_pool: i128,
+    pub bonus_max_payers: u32,
+    pub prerequisite_id: Option<u64>,
+    pub tranches: Vec<Tranche>,
+    pub released_bps: u32,
+    pub stake_amount: i128,
+    pub referrer: Option<Address>,
+    pub tax_bps: u32,
+    pub tax_authority: Option<Address>,
+    pub insurance_premium_bps: u32,
+    pub insurance_fund: i128,
+    pub smart_route: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceCore {
+    pub version: u32,
+    pub creator: Address,
+    pub co_creators: Vec<Address>,
+    pub recipients: Vec<Address>,
+    pub amounts: Vec<i128>,
+    pub tokens: Vec<Address>,
+    pub funding_token: Address,
+    pub deadline: u64,
+    pub funded: i128,
+    pub status: InvoiceStatus,
+    pub payments: Vec<Payment>,
+    pub drip_duration: Option<u64>,
+    pub release_timestamp: Option<u64>,
+    pub claimed: Vec<i128>,
+    pub frozen: bool,
+    pub completion_time: Option<u64>,
+    pub allow_early_withdrawal: bool,
+    pub bonus_pool: i128,
+    pub bonus_max_payers: u32,
+    pub prerequisite_id: Option<u64>,
+    pub tranches: Vec<Tranche>,
+    pub released_bps: u32,
+    pub clone_depth: u32,
+    pub predecessor_id: Option<u64>,
+    /// Issue #329: optional IPFS CID / SHA-256 hash of off-chain invoice metadata.
+    pub metadata_hash: Option<BytesN<32>>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceExt {
+    /// Addresses whose approval is required before the invoice can be released.
+    pub co_signers: Vec<Address>,
+    /// How many of `co_signers` approvals are required (≤ `co_signers.len()`).
+    pub required_signatures: u32,
+    /// Addresses that have actually approved the release so far.
+    pub signatures: Vec<Address>,
+    /// Optional address permitted to call `approve_release` on behalf of the creator.
+    pub approver: Option<Address>,
+    /// Whether the release has been approved by the required approvers.
+    pub approved: bool,
+    /// Optional oracle that must confirm a release condition before funds move.
+    pub condition_oracle: Option<Address>,
+    /// Whether the `condition_oracle` has signalled the condition is met.
+    pub condition_met: bool,
+    /// Penalty applied (in basis points) to late payments.
+    pub penalty_bps: u32,
+    /// Timestamp after which the `penalty_bps` penalty begins to apply.
+    pub penalty_deadline: u64,
+    /// Minimum funding threshold (basis points) that must be reached before release.
+    pub min_funding_bps: u32,
+    /// Configured release stages as basis points; empty = release all at once.
+    pub release_stages: Vec<u32>,
+    /// Count of release stages already paid out.
+    pub released_stages: u32,
+    /// Optional allowlist of payer addresses; `None` = open to anyone.
+    pub allowed_payers: Option<Vec<Address>>,
+    /// Optional price oracle used for dynamic (oracle-priced) funding.
+    pub price_oracle: Option<Address>,
+    /// Cached per-recipient base amounts used during release math.
+    pub base_amounts: Vec<i128>,
+    /// Per-recipient optional output token used for a DEX swap on release.
+    pub swap_tokens: Vec<Option<Address>>,
+    /// Tax levied on the invoice, in basis points.
+    pub tax_bps: u32,
+    /// Address that receives the tax withheld from the invoice.
+    pub tax_authority: Option<Address>,
+    /// Insurance premium (basis points) charged on the invoice.
+    pub insurance_premium_bps: u32,
+    /// Funds held in the insurance pool for this invoice.
+    pub insurance_fund: i128,
+    /// Whether payouts are routed through a smart-order router for best execution.
+    pub smart_route: bool,
+    /// When true, release registers the funds with the stream contract instead of a direct transfer.
+    pub convert_to_stream: bool,
+    /// Additional tokens (beyond the base token) accepted by `pay_with_token`.
+    pub accepted_tokens: Vec<Address>,
+    /// Optional address that leftover funds are forwarded to on release.
+    pub forward_to: Option<Address>,
+    /// Optional invoice id that leftover funds are forwarded to on release.
+    pub forward_invoice_id: Option<u64>,
+    /// Per-recipient split rules evaluated at release time; empty = use `amounts`.
+    pub split_rules: Vec<SplitRule>,
+    /// Pre-agreed auto-resolution rules evaluated in order by `auto_resolve`.
+    pub auto_resolve_rules: Vec<ResolveRule>,
+    /// Optional creator cosigner that must co-author creator actions.
+    pub creator_cosigner: Option<Address>,
+    /// Velocity limit (token units) for a single payer over `velocity_window`.
+    pub velocity_limit: i128,
+    /// Window length (seconds) for velocity limiting of payer contributions.
+    pub velocity_window: u64,
+    /// Optional id of the parent invoice this one was cloned from.
+    pub parent_invoice_id: Option<u64>,
+    /// Optional human-readable reason the invoice is paused.
+    pub pause_reason: Option<String>,
+    /// Optional timestamp at which a paused invoice auto-resumes.
+    pub auto_resume_at: Option<u64>,
+    /// Optional per-payer cooldown (seconds) between payments.
+    pub payment_cooldown_secs: Option<u64>,
+    /// Optional maximum number of payments allowed per `payment_window_secs`.
+    pub max_payments_per_window: Option<u32>,
+    /// Optional window (seconds) for per-payer payment rate limiting.
+    pub payment_window_secs: Option<u64>,
+    /// Optional timestamp at which release is scheduled to become available.
+    pub scheduled_release_at: Option<u64>,
+    /// Configured penalty tiers applied at different late-payment thresholds.
+    pub penalty_tiers: Vec<PenaltyTier>,
+    /// Optional allowlist of callers permitted to invoke mutating entry points.
+    pub allowed_callers: Option<Vec<Address>>,
+    /// Grace period (seconds) after `deadline` before a refund is allowed.
+    pub refund_grace_secs: Option<u64>,
+}
+
+impl InvoiceExt {
+    /// Issue #629: Return an InvoiceExt with all fields set to their zero /
+    /// empty / None defaults.  Use this as a starting point when constructing
+    /// a new InvoiceExt so that new fields are never accidentally omitted.
+    pub fn default(env: &Env) -> Self {
+        InvoiceExt {
+            co_signers: Vec::new(env),
+            required_signatures: 0,
+            signatures: Vec::new(env),
+            approver: None,
+            approved: false,
+            condition_oracle: None,
+            condition_met: false,
+            penalty_bps: 0,
+            penalty_deadline: 0,
+            min_funding_bps: 0,
+            release_stages: Vec::new(env),
+            released_stages: 0,
+            allowed_payers: None,
+            price_oracle: None,
+            base_amounts: Vec::new(env),
+            swap_tokens: Vec::new(env),
+            tax_bps: 0,
+            tax_authority: None,
+            insurance_premium_bps: 0,
+            insurance_fund: 0,
+            smart_route: false,
+            convert_to_stream: false,
+            accepted_tokens: Vec::new(env),
+            forward_to: None,
+            forward_invoice_id: None,
+            split_rules: Vec::new(env),
+            auto_resolve_rules: Vec::new(env),
+            creator_cosigner: None,
+            velocity_limit: 0,
+            velocity_window: 0,
+            parent_invoice_id: None,
+            pause_reason: None,
+            auto_resume_at: None,
+            payment_cooldown_secs: None,
+            max_payments_per_window: None,
+            payment_window_secs: None,
+            scheduled_release_at: None,
+            penalty_tiers: Vec::new(env),
+            allowed_callers: None,
+            refund_grace_secs: None,
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceExt2 {
+    pub notification_contract: Option<Address>,
+    pub overflow_behavior: OverflowBehavior,
+    pub cross_chain_ref: Option<String>,
+    pub require_kyc: bool,
+    /// Issue #188: arbiter address that can raise and resolve disputes.
+    pub arbiter: Option<Address>,
+    /// Issue #188: whether this invoice is under active dispute.
+    pub disputed: bool,
+    pub admin_frozen: bool,
+    pub auction_on_expiry: bool,
+    pub auction_end: u64,
+    pub bids: Vec<Bid>,
+    pub min_payment: i128,
+    pub min_funding_amount: i128,
+    pub priorities: Vec<u32>,
+    /// Issue #274: invoice target in USD cents for oracle-based dynamic funding.
+    pub target_usd_cents: Option<u64>,
+    /// Issue #308: addresses that have already claimed a per-payer refund on this invoice.
+    pub refunded_addresses: Vec<Address>,
+    /// Oracle-priced invoices: oracle contract queried at payment time.
+    pub oracle: Option<Address>,
+    /// Oracle-priced invoices: base asset symbol passed to the oracle.
+    pub oracle_asset_pair_base: Option<Symbol>,
+    /// Oracle-priced invoices: quote asset symbol passed to the oracle.
+    pub oracle_asset_pair_quote: Option<Symbol>,
+    /// Issue #349: minimum required payer reputation score.
+    pub min_payer_rep: Option<u32>,
+    pub escrow_hold_period: Option<u32>,
+    pub held_until: Option<u32>,
+    /// Funding milestone thresholds in basis points.
+    pub milestones: Vec<u32>,
+    /// Number of milestones already released.
+    pub milestones_released: u32,
+    /// Optional per-recipient payout caps parallel to `recipients`.
+    pub recipient_max_payouts: Vec<Option<i128>>,
+    /// Time-weighted average funding rate accumulator numerator.
+    pub twafr_numerator: i128,
+    /// Last ledger sequence used to update TWAFR.
+    pub twafr_last_ledger: u32,
+    /// Issue #416: SHA-256 hash required to release the invoice.
+    pub release_condition_hash: Option<BytesN<32>>,
+    /// Issue #417: recipient whitelist enforcement flag.
+    pub recipient_whitelist_enabled: bool,
+    /// Issue #420: creator-configurable overfunding behaviour.
+    pub overfunding_policy: OverfundingPolicy,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
+    /// Issue #489: ledgers after creation during which contributions qualify
+    /// for `early_bird_fee_bps`. 0 disables the discount.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) for contributions made within
+    /// the early-bird window.
+    pub early_bird_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
+    /// Issue #559: creator fee in basis points (taken before platform fee).
+    pub creator_fee_bps: u32,
+    /// Issue #518: denominator for custom split ratios.
+    pub ratio_denominator: u64,
+    /// Issue #518: per-recipient split ratios (parallel to recipients vec).
+    pub ratios: Vec<u32>,
+    /// Issue #747: maximum total contribution allowed from any single payer.
+    /// `None` means no per-payer cap is enforced.
+    pub max_contribution_per_payer: Option<i128>,
+}
+
+impl InvoiceExt2 {
+    /// Issue #629: Return an InvoiceExt2 with all fields set to their zero /
+    /// empty / None defaults.  Use this as a starting point when constructing
+    /// a new InvoiceExt2 so that new fields are never accidentally omitted.
+    pub fn default(env: &Env) -> Self {
+        InvoiceExt2 {
+            notification_contract: None,
+            overflow_behavior: OverflowBehavior::Reject,
+            cross_chain_ref: None,
+            require_kyc: false,
+            arbiter: None,
+            disputed: false,
+            admin_frozen: false,
+            auction_on_expiry: false,
+            auction_end: 0,
+            bids: Vec::new(env),
+            min_payment: 0,
+            min_funding_amount: 0,
+            priorities: Vec::new(env),
+            target_usd_cents: None,
+            refunded_addresses: Vec::new(env),
+            oracle: None,
+            oracle_asset_pair_base: None,
+            oracle_asset_pair_quote: None,
+            min_payer_rep: None,
+            escrow_hold_period: None,
+            held_until: None,
+            milestones: Vec::new(env),
+            milestones_released: 0,
+            recipient_max_payouts: Vec::new(env),
+            twafr_numerator: 0,
+            twafr_last_ledger: 0,
+            release_condition_hash: None,
+            recipient_whitelist_enabled: false,
+            // Issue #420: Cap delegates to overflow_behavior and preserves
+            // historical semantics for invoices created before this field existed.
+            overfunding_policy: OverfundingPolicy::Cap,
+            contributor_allowlist: None,
+            early_bird_window_ledgers: 0,
+            early_bird_fee_bps: 0,
+            early_bird_fee_credit: 0,
+            creator_fee_bps: 0,
+            ratio_denominator: 10_000,
+            ratios: Vec::new(env),
+            max_contribution_per_payer: None,
+        }
+    }
+}
+
+/// Issue #211: A single escalating penalty tier (seconds_after_deadline, bps).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PenaltyTier {
+    pub seconds_after_deadline: u64,
+    pub bps: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Issue #763: Per-invoice history ring buffer
+// ---------------------------------------------------------------------------
+
+/// A single entry in the per-invoice history ring buffer (issue #763).
+///
+/// Written on every state-changing operation: pay, release, refund, cancel,
+/// clone, milestone completion, and dispute events.  The buffer is capped at
+/// [`HISTORY_RING_CAP`] entries; the oldest entry is overwritten when the
+/// buffer is full.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct HistoryEntry {
+    /// Short description of the operation (e.g. `Symbol::new(env, "pay")`).
+    pub event_type: Symbol,
+    /// Unix timestamp from `env.ledger().timestamp()` at the time the entry
+    /// was written.
+    pub timestamp: u64,
+    /// The address that triggered the operation (payer, creator, etc.).
+    pub actor: Address,
+    /// Optional token amount involved (present for pay/refund/release, absent
+    /// for state-only transitions like dispute or cancel).
+    pub amount: Option<i128>,
+}
+
+/// Maximum number of entries the per-invoice history ring buffer retains.
+/// When the 21st entry is written the oldest (index 0) is evicted.
+pub const HISTORY_RING_CAP: u32 = 20;
+
+// ---------------------------------------------------------------------------
+// Issue #760: Milestone-based invoice with sequential unlocking
+// ---------------------------------------------------------------------------
+
+/// Lifecycle status of a single milestone (issue #760).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MilestoneStatus {
+    /// Waiting for the previous milestone to complete before accepting funds.
+    Pending,
+    /// Currently accepting payments.
+    Active,
+    /// Fully funded; creator has called `complete_milestone` and funds were
+    /// released to recipients.
+    Completed,
+}
+
+/// A single milestone in a sequentially-unlocked invoice (issue #760).
+///
+/// Milestones are created via `InvoiceOptions::milestone_list` at invoice
+/// creation time and stored under `InvoiceKey::MilestoneData(invoice_id)`.
+/// Only the *active* milestone (determined by `get_active_milestone`) accepts
+/// payments; attempting to pay a completed or still-pending milestone panics.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Milestone {
+    /// Token amount that must be collected before this milestone is complete.
+    pub target_amount: i128,
+    /// Human-readable description stored as raw bytes (UTF-8 recommended).
+    pub description: Bytes,
+    /// Current lifecycle state.
+    pub status: MilestoneStatus,
+}
+
+/// Issue #475: Multi-signature admin set — replaces the single-admin model.
+/// Sensitive operations require `threshold`-of-N signers to approve.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdminSet {
+    /// All recognised admin signers.
+    pub signers: Vec<Address>,
+    /// Minimum number of approvals required to finalise an action.
+    pub threshold: u32,
+}
+
+/// Issue #475: Discriminated union of admin actions that can be proposed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum AdminAction {
+    /// Pause the entire contract.
+    PauseContract,
+    /// Unpause the contract.
+    UnpauseContract,
+    /// Update the platform fee in basis points.
+    SetPlatformFeeBps(u32),
+    /// Replace the treasury address.
+    SetTreasury(Address),
+    /// Replace the full AdminSet (rotate signers / change threshold).
+    ReplaceAdminSet(AdminSet),
+}
+
+/// Issue #475: On-chain record of a pending multi-sig admin proposal.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingAdminAction {
+    /// Keccak-like identifier (SHA-256 hash of the serialised action payload).
+    pub action_hash: BytesN<32>,
+    /// The actual action to execute once approved.
+    pub action: AdminAction,
+    /// Ledger timestamp when the proposal was created.
+    pub proposed_at: u64,
+    /// Set of signers who have already approved this proposal.
+    pub approvals: Vec<Address>,
+    /// Whether the proposal has been executed.
+    pub executed: bool,
+}
+
+/// Timelocked admin action queued for future execution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub enum TimelockAction {
+    SetTreasury(Address),
+    SetPlatformFee(u32),
+}
+
+/// A queued timelock action with metadata.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct QueuedAction {
+    pub action: TimelockAction,
+    pub queued_at: u64,
+    pub executed: bool,
+}
+
+/// Full invoice — assembled from InvoiceCore + InvoiceExt + InvoiceExt2.
+/// Never stored directly; use save_invoice / load_invoice helpers in lib.rs.
+#[derive(Clone, Debug)]
+pub struct Invoice {
+    pub version: u32,
+    pub creator: Address,
+    pub co_creators: Vec<Address>,
+    pub recipients: Vec<Address>,
+    pub amounts: Vec<i128>,
+    pub tokens: Vec<Address>,
+    pub funding_token: Address,
+    pub deadline: u64,
+    pub funded: i128,
+    pub status: InvoiceStatus,
+    pub payments: Vec<Payment>,
+    pub drip_duration: Option<u64>,
+    pub release_timestamp: Option<u64>,
+    pub claimed: Vec<i128>,
+    pub frozen: bool,
+    pub completion_time: Option<u64>,
+    pub allow_early_withdrawal: bool,
+    pub bonus_pool: i128,
+    pub bonus_max_payers: u32,
+    pub prerequisite_id: Option<u64>,
+    pub tranches: Vec<Tranche>,
+    pub released_bps: u32,
+    pub co_signers: Vec<Address>,
+    pub required_signatures: u32,
+    pub signatures: Vec<Address>,
+    pub approver: Option<Address>,
+    pub approved: bool,
+    pub condition_oracle: Option<Address>,
+    pub condition_met: bool,
+    pub penalty_bps: u32,
+    pub penalty_deadline: u64,
+    pub min_funding_bps: u32,
+    pub release_stages: Vec<u32>,
+    pub released_stages: u32,
+    pub allowed_payers: Option<Vec<Address>>,
+    pub price_oracle: Option<Address>,
+    pub base_amounts: Vec<i128>,
+    pub swap_tokens: Vec<Option<Address>>,
+    pub tax_bps: u32,
+    pub tax_authority: Option<Address>,
+    pub insurance_premium_bps: u32,
+    pub insurance_fund: i128,
+    pub smart_route: bool,
+    pub convert_to_stream: bool,
+    pub accepted_tokens: Vec<Address>,
+    pub forward_to: Option<Address>,
+    pub forward_invoice_id: Option<u64>,
+    pub split_rules: Vec<SplitRule>,
+    pub auto_resolve_rules: Vec<ResolveRule>,
+    pub creator_cosigner: Option<Address>,
+    pub velocity_limit: i128,
+    pub velocity_window: u64,
+    pub parent_invoice_id: Option<u64>,
+    pub pause_reason: Option<String>,
+    pub auto_resume_at: Option<u64>,
+    pub payment_cooldown_secs: Option<u64>,
+    pub max_payments_per_window: Option<u32>,
+    pub payment_window_secs: Option<u64>,
+    /// Scheduled release timestamp (issue #207).
+    pub scheduled_release_at: Option<u64>,
+    /// Issue #199: grace period in seconds after deadline before refund is allowed.
+    pub refund_grace_secs: Option<u64>,
+    /// Issue #211: escalating penalty tiers.
+    pub penalty_tiers: Vec<PenaltyTier>,
+    /// Issue #208: restrict payments to specific calling contracts; None = open.
+    pub allowed_callers: Option<Vec<Address>>,
+    pub notification_contract: Option<Address>,
+    pub overflow_behavior: OverflowBehavior,
+    pub cross_chain_ref: Option<String>,
+    pub require_kyc: bool,
+    pub arbiter: Option<Address>,
+    pub disputed: bool,
+    pub admin_frozen: bool,
+    pub auction_on_expiry: bool,
+    pub auction_end: u64,
+    pub bids: Vec<Bid>,
+    pub min_payment: i128,
+    pub min_funding_amount: i128,
+    pub priorities: Vec<u32>,
+    pub clone_depth: u32,
+    /// Issue #274: invoice target in USD cents for oracle-based dynamic funding.
+    pub target_usd_cents: Option<u64>,
+    /// Issue #308: addresses that have already claimed a per-payer refund on this invoice.
+    pub refunded_addresses: Vec<Address>,
+    /// Oracle-priced invoices: oracle contract queried at payment time.
+    pub oracle: Option<Address>,
+    /// Oracle-priced invoices: base asset symbol passed to the oracle.
+    pub oracle_asset_pair_base: Option<Symbol>,
+    /// Oracle-priced invoices: quote asset symbol passed to the oracle.
+    pub oracle_asset_pair_quote: Option<Symbol>,
+    /// Issue #349: minimum required payer reputation score.
+    pub min_payer_rep: Option<u32>,
+    pub escrow_hold_period: Option<u32>,
+    pub held_until: Option<u32>,
+    pub milestones: Vec<u32>,
+    pub milestones_released: u32,
+    pub recipient_max_payouts: Vec<Option<i128>>,
+    pub twafr_numerator: i128,
+    pub twafr_last_ledger: u32,
+    /// Issue #416: SHA-256 hash required to release the invoice.
+    pub release_condition_hash: Option<BytesN<32>>,
+    /// Issue #417: recipient whitelist enforcement flag.
+    pub recipient_whitelist_enabled: bool,
+    /// Issue #420: creator-configurable overfunding behaviour.
+    pub overfunding_policy: OverfundingPolicy,
+    pub predecessor_id: Option<u64>,
+    /// Issue #329: optional IPFS CID / SHA-256 hash of off-chain invoice metadata.
+    pub metadata_hash: Option<BytesN<32>>,
+    /// Issue #485: optional contributor allowlist; when Some only listed addresses may call pay/contribute.
+    pub contributor_allowlist: Option<Vec<Address>>,
+    /// Issue #489: ledgers after creation during which contributions qualify
+    /// for `early_bird_fee_bps`. 0 disables the discount.
+    pub early_bird_window_ledgers: u32,
+    /// Issue #489: discounted platform fee (bps) for contributions made within
+    /// the early-bird window.
+    pub early_bird_fee_bps: u32,
+    /// Issue #489: total platform-fee discount accrued from early-bird
+    /// contributions so far; deducted from the platform fee at release.
+    pub early_bird_fee_credit: i128,
+    /// Issue #559: creator-declared fee in basis points (0–10 000).
+    /// Deducted from gross collected funds before recipient payouts.
+    pub creator_fee_bps: u32,
+    /// Issue #518: denominator for high-precision ratio splits.
+    pub ratio_denominator: u64,
+    /// Issue #518: per-recipient split ratios evaluated at release time.
+    pub ratios: Vec<u32>,
+    /// Issue #747: maximum total contribution allowed from any single payer.
+    /// `None` means no per-payer cap is enforced.
+    pub max_contribution_per_payer: Option<i128>,
+}
+
+impl Invoice {
+    pub fn split(self) -> (InvoiceCore, InvoiceExt, InvoiceExt2) {
+        (
+            InvoiceCore {
+                version: self.version,
+                creator: self.creator,
+                co_creators: self.co_creators,
+                recipients: self.recipients,
+                amounts: self.amounts,
+                tokens: self.tokens,
+                funding_token: self.funding_token,
+                deadline: self.deadline,
+                funded: self.funded,
+                status: self.status,
+                payments: self.payments,
+                drip_duration: self.drip_duration,
+                release_timestamp: self.release_timestamp,
+                claimed: self.claimed,
+                frozen: self.frozen,
+                completion_time: self.completion_time,
+                allow_early_withdrawal: self.allow_early_withdrawal,
+                bonus_pool: self.bonus_pool,
+                bonus_max_payers: self.bonus_max_payers,
+                prerequisite_id: self.prerequisite_id,
+                tranches: self.tranches,
+                released_bps: self.released_bps,
+                clone_depth: self.clone_depth,
+                predecessor_id: self.predecessor_id,
+                metadata_hash: self.metadata_hash,
+            },
+            InvoiceExt {
+                co_signers: self.co_signers,
+                required_signatures: self.required_signatures,
+                signatures: self.signatures,
+                approver: self.approver,
+                approved: self.approved,
+                condition_oracle: self.condition_oracle,
+                condition_met: self.condition_met,
+                penalty_bps: self.penalty_bps,
+                penalty_deadline: self.penalty_deadline,
+                min_funding_bps: self.min_funding_bps,
+                release_stages: self.release_stages,
+                released_stages: self.released_stages,
+                allowed_payers: self.allowed_payers,
+                price_oracle: self.price_oracle,
+                base_amounts: self.base_amounts,
+                swap_tokens: self.swap_tokens,
+                tax_bps: self.tax_bps,
+                tax_authority: self.tax_authority,
+                insurance_premium_bps: self.insurance_premium_bps,
+                insurance_fund: self.insurance_fund,
+                smart_route: self.smart_route,
+                convert_to_stream: self.convert_to_stream,
+                accepted_tokens: self.accepted_tokens,
+                forward_to: self.forward_to,
+                forward_invoice_id: self.forward_invoice_id,
+                split_rules: self.split_rules,
+                auto_resolve_rules: self.auto_resolve_rules,
+                creator_cosigner: self.creator_cosigner,
+                velocity_limit: self.velocity_limit,
+                velocity_window: self.velocity_window,
+                parent_invoice_id: self.parent_invoice_id,
+                pause_reason: self.pause_reason,
+                auto_resume_at: self.auto_resume_at,
+                payment_cooldown_secs: self.payment_cooldown_secs,
+                max_payments_per_window: self.max_payments_per_window,
+                payment_window_secs: self.payment_window_secs,
+                scheduled_release_at: self.scheduled_release_at,
+                penalty_tiers: self.penalty_tiers,
+                allowed_callers: self.allowed_callers,
+                refund_grace_secs: self.refund_grace_secs,
+            },
+            InvoiceExt2 {
+                notification_contract: self.notification_contract,
+                overflow_behavior: self.overflow_behavior,
+                cross_chain_ref: self.cross_chain_ref,
+                require_kyc: self.require_kyc,
+                arbiter: self.arbiter,
+                disputed: self.disputed,
+                admin_frozen: self.admin_frozen,
+                auction_on_expiry: self.auction_on_expiry,
+                auction_end: self.auction_end,
+                bids: self.bids,
+                min_payment: self.min_payment,
+                min_funding_amount: self.min_funding_amount,
+                priorities: self.priorities,
+                target_usd_cents: self.target_usd_cents,
+                refunded_addresses: self.refunded_addresses,
+                oracle: self.oracle,
+                oracle_asset_pair_base: self.oracle_asset_pair_base,
+                oracle_asset_pair_quote: self.oracle_asset_pair_quote,
+                min_payer_rep: self.min_payer_rep,
+                escrow_hold_period: self.escrow_hold_period,
+                held_until: self.held_until,
+                milestones: self.milestones,
+                milestones_released: self.milestones_released,
+                recipient_max_payouts: self.recipient_max_payouts,
+                twafr_numerator: self.twafr_numerator,
+                twafr_last_ledger: self.twafr_last_ledger,
+                release_condition_hash: self.release_condition_hash,
+                recipient_whitelist_enabled: self.recipient_whitelist_enabled,
+                overfunding_policy: self.overfunding_policy,
+                contributor_allowlist: self.contributor_allowlist,
+                early_bird_window_ledgers: self.early_bird_window_ledgers,
+                early_bird_fee_bps: self.early_bird_fee_bps,
+                early_bird_fee_credit: self.early_bird_fee_credit,
+                creator_fee_bps: self.creator_fee_bps,
+                ratio_denominator: self.ratio_denominator,
+                ratios: self.ratios.clone(),
+                max_contribution_per_payer: self.max_contribution_per_payer,
+            },
+        )
+    }
+
+    pub fn assemble(core: InvoiceCore, ext: InvoiceExt, ext2: InvoiceExt2) -> Self {
+        Invoice {
+            version: core.version,
+            creator: core.creator,
+            co_creators: core.co_creators,
+            recipients: core.recipients,
+            amounts: core.amounts,
+            tokens: core.tokens,
+            funding_token: core.funding_token,
+            deadline: core.deadline,
+            funded: core.funded,
+            status: core.status,
+            payments: core.payments,
+            drip_duration: core.drip_duration,
+            release_timestamp: core.release_timestamp,
+            claimed: core.claimed,
+            frozen: core.frozen,
+            completion_time: core.completion_time,
+            allow_early_withdrawal: core.allow_early_withdrawal,
+            bonus_pool: core.bonus_pool,
+            bonus_max_payers: core.bonus_max_payers,
+            prerequisite_id: core.prerequisite_id,
+            tranches: core.tranches,
+            released_bps: core.released_bps,
+            clone_depth: core.clone_depth,
+            predecessor_id: core.predecessor_id,
+            metadata_hash: core.metadata_hash,
+            co_signers: ext.co_signers,
+            required_signatures: ext.required_signatures,
+            signatures: ext.signatures,
+            approver: ext.approver,
+            approved: ext.approved,
+            condition_oracle: ext.condition_oracle,
+            condition_met: ext.condition_met,
+            penalty_bps: ext.penalty_bps,
+            penalty_deadline: ext.penalty_deadline,
+            min_funding_bps: ext.min_funding_bps,
+            release_stages: ext.release_stages,
+            released_stages: ext.released_stages,
+            allowed_payers: ext.allowed_payers,
+            price_oracle: ext.price_oracle,
+            base_amounts: ext.base_amounts,
+            swap_tokens: ext.swap_tokens,
+            tax_bps: ext.tax_bps,
+            tax_authority: ext.tax_authority,
+            insurance_premium_bps: ext.insurance_premium_bps,
+            insurance_fund: ext.insurance_fund,
+            smart_route: ext.smart_route,
+            convert_to_stream: ext.convert_to_stream,
+            accepted_tokens: ext.accepted_tokens,
+            forward_to: ext.forward_to,
+            forward_invoice_id: ext.forward_invoice_id,
+            split_rules: ext.split_rules,
+            auto_resolve_rules: ext.auto_resolve_rules,
+            creator_cosigner: ext.creator_cosigner,
+            velocity_limit: ext.velocity_limit,
+            velocity_window: ext.velocity_window,
+            parent_invoice_id: ext.parent_invoice_id,
+            pause_reason: ext.pause_reason,
+            auto_resume_at: ext.auto_resume_at,
+            payment_cooldown_secs: ext.payment_cooldown_secs,
+            max_payments_per_window: ext.max_payments_per_window,
+            payment_window_secs: ext.payment_window_secs,
+            scheduled_release_at: ext.scheduled_release_at,
+            penalty_tiers: ext.penalty_tiers,
+            allowed_callers: ext.allowed_callers,
+            refund_grace_secs: ext.refund_grace_secs,
+            notification_contract: ext2.notification_contract,
+            overflow_behavior: ext2.overflow_behavior,
+            cross_chain_ref: ext2.cross_chain_ref,
+            require_kyc: ext2.require_kyc,
+            arbiter: ext2.arbiter,
+            disputed: ext2.disputed,
+            admin_frozen: ext2.admin_frozen,
+            auction_on_expiry: ext2.auction_on_expiry,
+            auction_end: ext2.auction_end,
+            bids: ext2.bids,
+            min_payment: ext2.min_payment,
+            min_funding_amount: ext2.min_funding_amount,
+            priorities: ext2.priorities,
+            target_usd_cents: ext2.target_usd_cents,
+            refunded_addresses: ext2.refunded_addresses,
+            oracle: ext2.oracle,
+            oracle_asset_pair_base: ext2.oracle_asset_pair_base,
+            oracle_asset_pair_quote: ext2.oracle_asset_pair_quote,
+            min_payer_rep: ext2.min_payer_rep,
+            escrow_hold_period: ext2.escrow_hold_period,
+            held_until: ext2.held_until,
+            milestones: ext2.milestones,
+            milestones_released: ext2.milestones_released,
+            recipient_max_payouts: ext2.recipient_max_payouts,
+            twafr_numerator: ext2.twafr_numerator,
+            twafr_last_ledger: ext2.twafr_last_ledger,
+            release_condition_hash: ext2.release_condition_hash,
+            recipient_whitelist_enabled: ext2.recipient_whitelist_enabled,
+            overfunding_policy: ext2.overfunding_policy,
+            contributor_allowlist: ext2.contributor_allowlist,
+            early_bird_window_ledgers: ext2.early_bird_window_ledgers,
+            early_bird_fee_bps: ext2.early_bird_fee_bps,
+            early_bird_fee_credit: ext2.early_bird_fee_credit,
+            creator_fee_bps: ext2.creator_fee_bps,
+            ratio_denominator: ext2.ratio_denominator,
+            ratios: ext2.ratios,
+            max_contribution_per_payer: ext2.max_contribution_per_payer,
+        }
+    }
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentCertificate {
+    /// The invoice this certificate covers.
+    pub invoice_id: u64,
+    /// Total amount paid out to all recipients.
+    pub total: i128,
+    /// All recipient addresses that received funds.
+    pub recipients: Vec<Address>,
+    /// Ledger timestamp at which the invoice was released.
+    pub release_timestamp: u64,
+    /// SHA-256 hash over (invoice_id || total || release_timestamp), deterministic for the same data.
+    pub cert_hash: BytesN<32>,
+}
+
+/// Issue #144: Payment analytics for an invoice, callable by external contracts.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TreasuryRecord {
+    pub invoice_ids: Vec<u64>,
+    pub treasury: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum GroupMode {
+    AllOrNothing,
+    Majority,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceGroup {
+    pub invoice_ids: Vec<u64>,
+    pub mode: GroupMode,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceStats {
+    pub funded: i128,
+    pub total: i128,
+    pub payment_count: u32,
+    pub unique_payers: u32,
+    pub completion_bps: u32,
+    /// Cumulative total of all contributions ever made to this invoice,
+    /// including amounts that were later withdrawn or refunded.
+    /// Never decremented — monotonically increases with each payment.
+    pub cumulative_contributed: i128,
+}
+
+/// Compact storage representation of Invoice — serializes InvoiceCore fields using minimal byte encoding.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceSnapshot {
+    pub core: InvoiceCore,
+    pub ext: InvoiceExt,
+    pub ext2: InvoiceExt2,
+    pub audit_log: Vec<AuditEntry>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CompactInvoice {
+    /// Serialized bytes: [status(1), funded(16), deadline(8), ...rest]
+    pub data: Bytes,
+}
+
+impl Invoice {
+    /// Convert Invoice to compact byte representation.
+    pub fn to_compact(&self, env: &Env) -> CompactInvoice {
+        let mut bytes = Bytes::new(env);
+
+        // Pack status as 1 byte
+        let status_byte: u8 = match self.status {
+            InvoiceStatus::Pending => 0,
+            InvoiceStatus::Released => 1,
+            InvoiceStatus::Refunded => 2,
+            InvoiceStatus::Cancelled => 3,
+            InvoiceStatus::Expired => 4,
+            InvoiceStatus::Disputed => 5,
+            InvoiceStatus::PartiallyReleased => 6,
+            InvoiceStatus::Finalised => 7,
+            InvoiceStatus::Deleted => 8,
+            InvoiceStatus::PayoutInProgress => 9,
+        };
+        bytes.push_back(status_byte);
+
+        // Pack funded as 16 bytes (i128)
+        let funded_bytes = self.funded.to_be_bytes();
+        for byte in funded_bytes.iter() {
+            bytes.push_back(*byte);
+        }
+
+        // Pack deadline as 8 bytes (u64)
+        let deadline_bytes = self.deadline.to_be_bytes();
+        for byte in deadline_bytes.iter() {
+            bytes.push_back(*byte);
+        }
+
+        CompactInvoice { data: bytes }
+    }
+
+    /// Restore Invoice from compact byte representation.
+    pub fn from_compact(
+        compact: &CompactInvoice,
+        core: InvoiceCore,
+        ext: InvoiceExt,
+        ext2: InvoiceExt2,
+    ) -> Self {
+        let bytes = &compact.data;
+
+        // Guard: require at least 25 bytes (1 status + 16 funded + 8 deadline).
+        if bytes.len() < 25 {
+            panic!("from_compact: data too short");
+        }
+
+        // Unpack status (1 byte)
+        let status_byte = bytes.get(0).expect("from_compact: byte 0 (status) missing");
+        let status = match status_byte {
+            0 => InvoiceStatus::Pending,
+            1 => InvoiceStatus::Released,
+            2 => InvoiceStatus::Refunded,
+            3 => InvoiceStatus::Cancelled,
+            4 => InvoiceStatus::Expired,
+            5 => InvoiceStatus::Disputed,
+            6 => InvoiceStatus::PartiallyReleased,
+            7 => InvoiceStatus::Finalised,
+            8 => InvoiceStatus::Deleted,
+            _ => InvoiceStatus::Pending,
+        };
+
+        // Unpack funded (16 bytes)
+        let mut funded_bytes = [0u8; 16];
+        for (i, byte) in funded_bytes.iter_mut().enumerate() {
+            *byte = bytes
+                .get((1 + i) as u32)
+                .expect("from_compact: funded byte missing");
+        }
+        let funded = i128::from_be_bytes(funded_bytes);
+
+        // Unpack deadline (8 bytes)
+        let mut deadline_bytes = [0u8; 8];
+        for (i, byte) in deadline_bytes.iter_mut().enumerate() {
+            *byte = bytes
+                .get((17 + i) as u32)
+                .expect("from_compact: deadline byte missing");
+        }
+        let deadline = u64::from_be_bytes(deadline_bytes);
+
+        // Reconstruct full invoice with updated fields
+        let mut invoice = Invoice::assemble(core, ext, ext2);
+        invoice.status = status;
+        invoice.funded = funded;
+        invoice.deadline = deadline;
+        invoice
+    }
+
+    /// Upgrade a legacy (pre-version) invoice to the current schema.
+    /// New fields are filled with their default (empty / zero) values.
+    pub fn from_legacy(old: LegacyInvoice, env: &Env) -> Self {
+        let funding_token = old.tokens.get(0).expect("no token").clone();
+
+        // Issue #629: start from defaults and override only the fields that
+        // LegacyInvoice carries, so that new fields are never accidentally
+        // omitted when the schema grows.
+        let mut ext = InvoiceExt::default(env);
+        ext.base_amounts = old.amounts.clone();
+
+        let mut ext2 = InvoiceExt2::default(env);
+        // Issue #420: legacy invoices predate the policy field; `Cap`
+        // delegates to `overflow_behavior` and so preserves their
+        // original overfunding semantics exactly.
+        ext2.overfunding_policy = OverfundingPolicy::Cap;
+
+        let core = InvoiceCore {
+            version: 2,
+            creator: old.creator,
+            co_creators: old.co_creators,
+            recipients: old.recipients,
+            amounts: old.amounts,
+            tokens: old.tokens,
+            funding_token,
+            deadline: old.deadline,
+            funded: old.funded,
+            status: old.status,
+            payments: old.payments,
+            drip_duration: old.drip_duration,
+            release_timestamp: old.release_timestamp,
+            claimed: old.claimed,
+            frozen: old.frozen,
+            completion_time: old.completion_time,
+            allow_early_withdrawal: old.allow_early_withdrawal,
+            bonus_pool: old.bonus_pool,
+            bonus_max_payers: old.bonus_max_payers,
+            prerequisite_id: old.prerequisite_id,
+            tranches: old.tranches,
+            released_bps: old.released_bps,
+            clone_depth: 0,
+            predecessor_id: None,
+            metadata_hash: None,
+        };
+
+        Invoice::assemble(core, ext, ext2)
+    }
+}
+
+/// Issue #327 / #329 / #330: Extended invoice fields for new features.
+/// Stored in separate persistent storage so existing InvoiceCore / InvoiceExt / InvoiceExt2
+/// XDR layouts are not disturbed.
+///
+/// # Storage layout
+/// Unlike `InvoiceCore`/`InvoiceExt`/`InvoiceExt2` (which are read from a single storage
+/// entry per invoice, keyed via the `InvoiceKey` enum in `storage_keys.rs`), `InvoiceExt3`
+/// is **not** persisted as one serialized struct under a single key. It is a read-model
+/// assembled on demand (see `get_invoice_ext3` in `lib.rs`) by reading four independent
+/// persistent-storage entries for the same `invoice_id`, each under its own `(Symbol, u64)`
+/// key defined in `lib.rs`:
+///   - `release_delay_ledgers` <- `release_delay_key(id)`      -> `(symbol_short!("rel_dly"), id)`
+///   - `funded_at_ledger`      <- `funded_at_ledger_key(id)`    -> `(symbol_short!("fund_led"), id)`
+///   - `metadata_hash`         <- `metadata_hash_key(id)`       -> `(symbol_short!("meta_hsh"), id)`
+///   - `paid_recipients`       <- `paid_recipients_key(id)`     -> `(symbol_short!("paid_rec"), id)`
+///
+/// `unlock_at_ledger` is not stored at all; it is derived at read time as
+/// `funded_at_ledger + release_delay_ledgers` (or `None` if either input is unset).
+///
+/// This per-field key layout — rather than a single `InvoiceKey::Ext3(invoice_id)`-style
+/// entry — lets each field evolve (be added, migrated, or left absent for older invoices)
+/// independently, without needing to re-serialize or migrate the whole struct. It keeps
+/// `InvoiceCore`/`InvoiceExt`/`InvoiceExt2`'s existing XDR layouts completely untouched,
+/// since none of these new fields share storage with them.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceExt3 {
+    /// Issue #327: creator-set ledger delay before funds can be released.
+    pub release_delay_ledgers: Option<u32>,
+    /// Issue #327: ledger sequence when the invoice became fully funded.
+    pub funded_at_ledger: Option<u32>,
+    /// Issue #327: computed unlock ledger (funded_at_ledger + release_delay_ledgers).
+    /// None if no delay is set.
+    pub unlock_at_ledger: Option<u32>,
+    /// Issue #329: IPFS CID or SHA-256 hash of off-chain metadata.
+    pub metadata_hash: Option<BytesN<32>>,
+    /// Issue #330: recipients whose share has already been transferred.
+    pub paid_recipients: Vec<Address>,
+}
+
+/// Issue #562: Tombstone record for soft-deleted invoices.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Tombstone {
+    pub invoice_id: u64,
+    pub deleted_at_ledger: u32,
+    pub deleted_by: Address,
+}
+
+/// Issue #298: Result type returned by simulate_release().
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct SimulateReleaseResult {
+    pub estimated_instructions: u64,
+    pub estimated_fee_stroops: u64,
+    pub would_succeed: bool,
+}
+
+/// Issue #325: Status of a payer-raised dispute.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DisputeStatus {
+    Active,
+    Resolved,
+    Expired,
+}
+
+/// Issue #325: Outcome of a resolved dispute.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DisputeOutcome {
+    Approved,
+    Refunded,
+    /// Admin resolves the dispute and releases funds normally.
+    Release,
+    /// Admin resolves the dispute and refunds all contributors.
+    Refund,
+}
+
+/// Issue #325: On-chain record of a payer-initiated dispute.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DisputeRecord {
+    pub reason_hash: BytesN<32>,
+    pub raised_at: u32,
+    pub status: DisputeStatus,
+    /// Admin-configurable timeout in ledgers for auto-resolution.
+    pub dispute_timeout_ledgers: u32,
+    /// Ledger sequence when the dispute was opened (for timeout calculation).
+    pub dispute_opened_ledger: u32,
+}
+
+/// Issue #326: Protocol fee configuration set by admin.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ProtocolFeeConfig {
+    pub rate_bps: u32,
+    pub treasury: Address,
+}
+
+/// Issue #521: A single fee-recipient entry for proportional fee distribution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeSplit {
+    pub address: Address,
+    pub basis_points: u32,
+}
+
+/// Issue #316 / #351: Compute budget estimate for a contract function.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComputeEstimate {
+    pub cpu_insns: u64,
+    pub mem_bytes: u64,
+    pub fee_stroops: i128,
+}
+
+/// Issue #297: Circuit breaker status returned by get_circuit_breaker_status().
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CircuitBreakerStatus {
+    pub active: bool,
+    pub reason: Option<String>,
+}
+
+/// Issue #295: A single confidential payment record stored per payer.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ConfidentialPayment {
+    pub commitment: BytesN<32>,
+    pub encrypted_amount: Bytes,
+}
+
+/// Issue #310: Parameters for create_invoice v2 — groups all fields to stay within
+/// Soroban's argument limit.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceParams {
+    pub creator: Address,
+    pub recipients: Vec<Address>,
+    pub payment_token: Option<Address>,
+    pub tags: Option<Vec<String>>,
+    // ... add all other fields here ...
+}
+
+/// Issue #310: Pending WASM upgrade proposal stored in instance storage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UpgradeProposal {
+    pub new_wasm_hash: BytesN<32>,
+    /// Ledger timestamp after which the upgrade may be executed.
+    pub eligible_at: u64,
+}
+
+/// Hot invoice fields stored in instance storage for TTL-efficient reads.
+///
+/// These four fields are read on every `pay()` call.
+///
+/// # Design
+///
+/// Soroban charges rent independently per storage entry, and each entry's
+/// TTL must be extended on its own. Keeping these hot fields in the
+/// contract's *instance* bucket — rather than one persistent entry per
+/// invoice — means a single `extend_ttl` call on the instance covers every
+/// active invoice's hot data simultaneously: O(1) per payment rather than
+/// one persistent-rent `extend_ttl` charge per invoice entry.
+///
+/// This is a trade-off: instance storage is wiped on contract upgrade unless
+/// explicitly preserved, and it grows with every invoice ever created (there
+/// is no per-key eviction). Cold creation params and audit metadata that are
+/// not needed on the payment hot path stay in persistent storage instead
+/// (`InvoiceCore` / `InvoiceExt` / `InvoiceExt2`), where they can expire and
+/// be restored independently per invoice.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceHot {
+    /// Current lifecycle status — checked at the top of every `pay()`.
+    pub status: InvoiceStatus,
+    /// Cumulative funded amount — mutated on every payment.
+    pub funded: i128,
+    /// Sum of `amounts[]` cached at creation; avoids recomputing on each pay.
+    pub total: i128,
+    /// Recipient list — needed for penalty distribution and auto-release.
+    pub recipients: Vec<Address>,
+}
+
+// ---------------------------------------------------------------------------
+// Issue #334: Compact XDR storage helpers
+// ---------------------------------------------------------------------------
+
+impl InvoiceStatus {
+    /// Encode as a single byte — saves XDR overhead vs. the full enum variant.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use split::types::InvoiceStatus;
+    ///
+    /// assert_eq!(InvoiceStatus::Released.to_u8(), 1);
+    /// ```
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            InvoiceStatus::Pending => 0,
+            InvoiceStatus::Released => 1,
+            InvoiceStatus::Refunded => 2,
+            InvoiceStatus::Cancelled => 3,
+            InvoiceStatus::Expired => 4,
+            InvoiceStatus::Disputed => 5,
+            InvoiceStatus::PartiallyReleased => 6,
+            InvoiceStatus::Finalised => 7,
+            InvoiceStatus::Deleted => 8,
+            InvoiceStatus::PayoutInProgress => 9,
+        }
+    }
+
+    /// Decode from a single byte.  Unknown byte values fall back to
+    /// `InvoiceStatus::Pending` so that forward-compatibility reads and
+    /// corrupt/out-of-range bytes never produce an invalid variant.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => InvoiceStatus::Pending,
+            1 => InvoiceStatus::Released,
+            2 => InvoiceStatus::Refunded,
+            3 => InvoiceStatus::Cancelled,
+            4 => InvoiceStatus::Expired,
+            5 => InvoiceStatus::Disputed,
+            6 => InvoiceStatus::PartiallyReleased,
+            7 => InvoiceStatus::Finalised,
+            8 => InvoiceStatus::Deleted,
+            9 => InvoiceStatus::PayoutInProgress,
+            _ => InvoiceStatus::Pending,
+        }
+    }
+}
+
+/// Issue #334: Result returned by `compact_migrate`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CompactMigrateResult {
+    /// Invoice ID that was migrated.
+    pub invoice_id: u64,
+    /// Status byte written to compact storage (0–3).
+    pub status_byte: u32,
+    /// Whether the deadline was representable as a ledger sequence.
+    pub deadline_migrated: bool,
+}
+
+/// Issue #332: Optimized release result.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ReleaseResult {
+    /// Number of recipients paid in this call.
+    pub recipients_paid: u32,
+    /// Total amount transferred.
+    pub total_transferred: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalmentTranche {
+    pub amount: i128,
+    pub ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalmentPlan {
+    pub tranches: Vec<InstalmentTranche>,
+    pub paid_index: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeBracket {
+    pub max_amount: i128,
+    pub rate_bps: u32,
+}
+
+/// Issue #476: Reusable invoice template stored on-chain under a numeric ID.
+/// A creator stores this once and instantiates invoices from it via
+/// `invoice_from_template(template_id, total_amount, deadline)`.
+///
+/// `ratios` is parallel to `recipients` and encodes each recipient's share in
+/// basis points (sum must equal 10 000).  On instantiation the contract
+/// distributes `total_amount * ratio / 10 000` to each recipient.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InvoiceTemplateRecord {
+    /// Ordered list of recipient addresses.
+    pub recipients: Vec<Address>,
+    /// Per-recipient share in basis points, parallel to `recipients`.
+    /// Must sum to 10 000.
+    pub ratios: Vec<u32>,
+    /// Token used for payment and payout.
+    pub token: Address,
+}
+
+/// Issue #476: Counter (u64) of templates created by a given creator.
+/// Stored under `TemplateCtr(creator)` in persistent storage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TemplateCounter {
+    pub next_id: u64,
+}
+
+/// Issue #748: Optional field overrides applied when instantiating an invoice
+/// from a saved template.
+///
+/// Every field is optional; a `None` field means "keep the value stored in the
+/// template". Overrides are validated with exactly the same rules as
+/// `create_invoice` (parallel `recipients`/`amounts`, positive amounts, at
+/// least one recipient), so a partially-filled override struct cannot produce
+/// a malformed invoice.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TemplateOverrides {
+    /// Replacement recipient list. When set, `amounts` must be set too and the
+    /// two lists must have the same length.
+    pub recipients: Option<Vec<Address>>,
+    /// Replacement per-recipient amounts, parallel to `recipients`.
+    pub amounts: Option<Vec<i128>>,
+    /// Replacement payment token.
+    pub token: Option<Address>,
+    /// Replacement deadline (unix timestamp). Takes precedence over the
+    /// `deadline` argument of `create_invoice_from_template`.
+    pub deadline: Option<u64>,
+}
+
+/// Issue #437: Delayed payout stored per recipient until claimable.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DelayedPayout {
+    /// Amount to be transferred to recipient.
+    pub amount: i128,
+    /// Ledger sequence at which this payout becomes claimable.
+    pub claimable_at_ledger: u32,
+}
+
+/// Issue #470: Result of contribute containing amount applied and refund amount.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContributionResult {
+    pub invoice_id: u64,
+    pub amount_applied: i128,
+    pub refund_amount: i128,
+}
+
+/// Issue #471: Storage key for recipient address rotation mapping.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecipientAddress(pub u64, pub Address);
+
+/// Per-recipient share tracking with optional lock for disputed recipients.
+/// When `locked` is true, the recipient's share is skipped during release
+/// and accumulated under `UnreleasedFunds(invoice_id)` until unlocked.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RecipientShare {
+    pub address: Address,
+    pub locked: bool,
+}
+
+/// Issue #790: a co-funding round with a hard cap. While open, `total_raised`
+/// and `overflow` are live; once closed they record the values at close.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoundInfo {
+    pub total_raised: i128,
+    pub hard_cap: i128,
+    /// Ledger timestamp after which `close_round` may be called.
+    pub round_end: u64,
+    pub closed: bool,
+    /// Amount raised above `hard_cap` (refunded pro-rata on close).
+    pub overflow: i128,
+}
+
+/// Issue #788: summary of an invoice's reward (bonus) pool.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RewardPoolInfo {
+    /// Amount the creator funded at creation.
+    pub pool_amount: i128,
+    /// Number of payers the pool is shared between.
+    pub top_n: u32,
+    /// Whether the pool has been paid out (on release).
+    pub distributed: bool,
+}
+
+/// Issue #527: A single payment record stored in a contributor's persistent history.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PaymentRecord {
+    pub invoice_id: u64,
+    pub amount: i128,
+    pub ledger: u32,
+}
+
+/// Issue #809: condition under which anyone may release an invoice through
+/// `trigger_auto_release`, without a manual `release` call by the creator.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AutoReleaseCondition {
+    /// Releasable once the ledger timestamp reaches this value (unix seconds).
+    AtTimestamp(u64),
+}
+
+/// Issue #810: aggregate on-chain performance metrics for a recipient.
+#[contracttype]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecipientMetrics {
+    /// Number of released invoices that listed this address as a recipient.
+    pub invoices_received_count: u32,
+}
+
+/// Issue #812: point-in-time export of contract-level configuration, for
+/// backup and for checking a migrated deployment against its source.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigSnapshot {
+    pub admin: Option<Address>,
+    pub treasury: Option<Address>,
+    pub usdc_token: Option<Address>,
+    pub paused: bool,
+    pub platform_fee_bps: u32,
+    /// Highest invoice id assigned so far.
+    pub invoice_count: u64,
+    pub schema_version: u32,
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::InvoiceStatus;
+
+    /// All ten variants must survive a to_u8 → from_u8 round-trip unchanged.
+    #[test]
+    fn invoice_status_round_trip_all_variants() {
+        let variants = [
+            InvoiceStatus::Pending,
+            InvoiceStatus::Released,
+            InvoiceStatus::Refunded,
+            InvoiceStatus::Expired,
+            InvoiceStatus::Cancelled,
+            InvoiceStatus::Disputed,
+            InvoiceStatus::PartiallyReleased,
+            InvoiceStatus::Finalised,
+            InvoiceStatus::Deleted,
+            InvoiceStatus::PayoutInProgress,
+        ];
+
+        for variant in &variants {
+            let byte = variant.to_u8();
+            let restored = InvoiceStatus::from_u8(byte);
+            assert_eq!(
+                restored, *variant,
+                "round-trip failed for variant {:?}: to_u8()={} decoded back to {:?}",
+                variant, byte, restored
+            );
+        }
+    }
+
+    /// Each variant's discriminant must be unique — no two variants may map to
+    /// the same byte, which would cause silent data corruption in compact storage.
+    #[test]
+    fn invoice_status_discriminants_are_unique() {
+        let variants = [
+            InvoiceStatus::Pending,
+            InvoiceStatus::Released,
+            InvoiceStatus::Refunded,
+            InvoiceStatus::Expired,
+            InvoiceStatus::Cancelled,
+            InvoiceStatus::Disputed,
+            InvoiceStatus::PartiallyReleased,
+            InvoiceStatus::Finalised,
+            InvoiceStatus::Deleted,
+            InvoiceStatus::PayoutInProgress,
+        ];
+
+        let mut seen = [false; 256];
+        for variant in &variants {
+            let byte = variant.to_u8() as usize;
+            assert!(
+                !seen[byte],
+                "discriminant collision: byte {} is used by more than one variant",
+                byte
+            );
+            seen[byte] = true;
+        }
+    }
+
+    /// An unknown byte value (e.g. 255) must map to InvoiceStatus::Pending
+    /// rather than panicking, so that future schema extensions and corrupt reads
+    /// degrade gracefully.
+    #[test]
+    fn invoice_status_unknown_byte_falls_back_to_pending() {
+        assert_eq!(InvoiceStatus::from_u8(255), InvoiceStatus::Pending);
+        // A few other out-of-range values for good measure.
+        assert_eq!(InvoiceStatus::from_u8(10), InvoiceStatus::Pending);
+        assert_eq!(InvoiceStatus::from_u8(100), InvoiceStatus::Pending);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #759: Creator rating aggregate
+// ---------------------------------------------------------------------------
+
+/// Aggregate on-chain rating for a creator, stored under creator_rating_key.
+///
+/// `average_stars_bps` is the mean star rating expressed in basis points
+/// (e.g. 4.5 stars = 45 000 bps).  Using basis points avoids floating-point
+/// arithmetic inside the contract.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct CreatorRating {
+    /// Total number of ratings submitted for this creator.
+    pub total_ratings: u32,
+    /// Average star rating in basis points (mean * 10 000).
+    pub average_stars_bps: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Issue #756: On-chain invoice notes
+// ---------------------------------------------------------------------------
+
+/// An immutable on-chain note posted by the invoice creator.
+///
+/// Notes are appended to a `Vec<Note>` stored under `notes_key(invoice_id)`
+/// and can never be deleted or edited after posting.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Note {
+    /// Ledger timestamp when the note was posted.
+    pub timestamp: u64,
+    /// Raw note content — maximum 512 bytes enforced at `add_note`.
+    pub content: Bytes,
+    /// Zero-based position of this note in the invoice's note list.
+    pub index: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Issue #758: Recurring subscription
+// ---------------------------------------------------------------------------
+
+/// On-chain subscription record created by `create_subscription`.
+///
+/// Anyone may call `trigger_subscription` once `last_triggered + interval_seconds`
+/// has elapsed to generate the next invoice in the series.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Subscription {
+    /// Creator / owner of the subscription.
+    pub creator: Address,
+    /// Recipient addresses for each generated invoice.
+    pub recipients: Vec<Address>,
+    /// Amounts owed to each recipient per cycle (parallel to `recipients`).
+    pub amounts: Vec<i128>,
+    /// Payment token used for all generated invoices.
+    pub token: Address,
+    /// Minimum seconds between invoice generations.
+    pub interval_seconds: u64,
+    /// Ledger timestamp of the last trigger (0 = never triggered).
+    pub last_triggered: u64,
+    /// Whether the subscription is currently paused.
+    pub paused: bool,
 }
 
 // ---------------------------------------------------------------------------
