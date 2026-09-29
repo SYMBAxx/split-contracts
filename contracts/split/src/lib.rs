@@ -76,6 +76,9 @@ mod ext_tests;
 mod fuzz_tests;
 
 #[cfg(test)]
+mod test_market_features;
+
+#[cfg(test)]
 mod storage_snapshot;
 
 #[cfg(test)]
@@ -93,6 +96,12 @@ mod velocity_ext;
 mod ext_test_util;
 
 mod invoice_ops;
+
+// Issues #857–#860: feature modules, each with its own `#[contractimpl]` block.
+mod dynamic_fee;
+mod earnings_insurance;
+mod invoice_links;
+mod liquidity_pool;
 
 use error::ContractError;
 use validation::assert_valid_bps;
