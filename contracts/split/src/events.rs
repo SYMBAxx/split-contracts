@@ -50,6 +50,10 @@ fn next_seq(env: &Env, invoice_id: u64) -> u64 {
 // Existing events
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Core invoice events
+// ---------------------------------------------------------------------------
+
 /// Emitted when a new invoice is created.
 /// Topics: (split, created, invoice_id)
 /// Data: (creator, total, event_seq)
@@ -2345,148 +2349,106 @@ pub fn payment_confirmed(env: &Env, invoice_id: u64, payer: &Address, amount: i1
     );
 }
 
-/// Issue #872: Emitted when an invoice pricing model is configured.
-/// Topics: (split, prx_set, invoice_id)
-/// Data: (base_price, tier_count, event_seq)
-pub fn pricing_model_set(env: &Env, invoice_id: u64, base_price: i128, tier_count: u32) {
-    let event_seq = next_seq(env, invoice_id);
+// ---------------------------------------------------------------------------
+// #865 – Creator collateral events
+// ---------------------------------------------------------------------------
+
+/// Emitted when a creator deposits collateral.
+pub fn collateral_deposited(env: &Env, creator: &Address, amount: i128) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("prx_set"), invoice_id),
-        (base_price, tier_count, event_seq),
+        (symbol_short!("col_dep"), creator.clone()),
+        amount,
     );
 }
 
-/// Issue #872: Emitted when surge pricing is toggled.
-/// Topics: (split, prx_srg, invoice_id)
-/// Data: (active, event_seq)
-pub fn pricing_surge_toggled(env: &Env, invoice_id: u64, active: bool) {
-    let event_seq = next_seq(env, invoice_id);
+/// Emitted when a creator withdraws collateral.
+pub fn collateral_withdrawn(env: &Env, creator: &Address, amount: i128) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("prx_srg"), invoice_id),
-        (active, event_seq),
+        (symbol_short!("col_wth"), creator.clone()),
+        amount,
     );
 }
 
-/// Issue #870: Emitted when a recipient delegation is set.
-/// Topics: (split, dlg_set, invoice_id)
-/// Data: (recipient, delegate, expires_at, event_seq)
-pub fn recipient_delegation_set(
-    env: &Env,
-    invoice_id: u64,
-    recipient: &Address,
-    delegate: &Address,
-    expires_at: &Option<u64>,
-) {
-    let event_seq = next_seq(env, invoice_id);
+/// Emitted when collateral is locked to back an invoice.
+pub fn collateral_locked(env: &Env, creator: &Address, invoice_id: u64, amount: i128) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("dlg_set"), invoice_id),
-        (recipient.clone(), delegate.clone(), expires_at.clone(), event_seq),
+        (symbol_short!("col_lck"), creator.clone()),
+        (invoice_id, amount),
     );
 }
 
-/// Issue #870: Emitted when a recipient delegation is revoked.
-/// Topics: (split, dlg_rev, invoice_id)
-/// Data: (recipient, event_seq)
-pub fn recipient_delegation_revoked(env: &Env, invoice_id: u64, recipient: &Address) {
-    let event_seq = next_seq(env, invoice_id);
+/// Emitted when collateral is unlocked after invoice completion.
+pub fn collateral_unlocked(env: &Env, creator: &Address, invoice_id: u64, amount: i128) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("dlg_rev"), invoice_id),
-        (recipient.clone(), event_seq),
+        (symbol_short!("col_ulk"), creator.clone()),
+        (invoice_id, amount),
     );
 }
 
-/// Issue #870: Emitted when recipient performance stats are updated.
-/// Topics: (split, rcp_perf)
-/// Data: (recipient, invoices_released, total_received)
-pub fn recipient_performance_updated(
-    env: &Env,
-    recipient: &Address,
-    invoices_released: u32,
-    total_received: i128,
-) {
+// ---------------------------------------------------------------------------
+// #866 – Rating / discount events
+// ---------------------------------------------------------------------------
+
+/// Emitted when a creator receives a new rating.
+pub fn creator_rated(env: &Env, creator: &Address, score: u32, new_avg_bps: u32) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("rcp_perf")),
-        (recipient.clone(), invoices_released, total_received),
+        (symbol_short!("rat_sub"), creator.clone()),
+        (score, new_avg_bps),
     );
 }
 
-/// Issue #871: Emitted when an invoice time-lock is set.
-/// Topics: (split, tl_set, invoice_id)
-/// Data: (unlock_at, lock_payments, lock_release, lock_refund, event_seq)
-pub fn timelock_set(
-    env: &Env,
-    invoice_id: u64,
-    unlock_at: u64,
-    lock_payments: bool,
-    lock_release: bool,
-    lock_refund: bool,
-) {
-    let event_seq = next_seq(env, invoice_id);
+/// Emitted when a discount is applied to an invoice based on creator rating.
+pub fn discount_applied(env: &Env, invoice_id: u64, creator: &Address, discount_bps: u32) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("tl_set"), invoice_id),
-        (unlock_at, lock_payments, lock_release, lock_refund, event_seq),
+        (symbol_short!("disc_app"), invoice_id),
+        (creator.clone(), discount_bps),
     );
 }
 
-/// Issue #871: Emitted when an invoice time-lock is removed.
-/// Topics: (split, tl_rem, invoice_id)
-/// Data: event_seq
-pub fn timelock_removed(env: &Env, invoice_id: u64) {
-    let event_seq = next_seq(env, invoice_id);
+// ---------------------------------------------------------------------------
+// #867 – Recipient performance / routing events
+// ---------------------------------------------------------------------------
+
+/// Emitted when a recipient's performance score is updated.
+pub fn performance_updated(env: &Env, recipient: &Address, score: i32) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("tl_rem"), invoice_id),
-        event_seq,
+        (symbol_short!("perf_upd"), recipient.clone()),
+        score,
     );
 }
 
-/// Issue #869: Emitted when a redemption token is issued.
-/// Topics: (split, rdm_iss, invoice_id)
-/// Data: (token_id, holder, claim_amount, expires_at, event_seq)
-pub fn redemption_token_issued(
-    env: &Env,
-    invoice_id: u64,
-    token_id: u64,
-    holder: &Address,
-    claim_amount: i128,
-    expires_at: &Option<u64>,
-) {
-    let event_seq = next_seq(env, invoice_id);
+/// Emitted when a recipient is flagged for poor performance.
+pub fn recipient_flagged(env: &Env, recipient: &Address, invoice_id: u64) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("rdm_iss"), invoice_id),
-        (token_id, holder.clone(), claim_amount, expires_at.clone(), event_seq),
+        (symbol_short!("rec_flg"), recipient.clone()),
+        invoice_id,
     );
 }
 
-/// Issue #869: Emitted when a redemption token is transferred to a new holder.
-/// Topics: (split, rdm_xfr, invoice_id)
-/// Data: (token_id, from, to, event_seq)
-pub fn redemption_token_transferred(
-    env: &Env,
-    invoice_id: u64,
-    token_id: u64,
-    from: &Address,
-    to: &Address,
-) {
-    let event_seq = next_seq(env, invoice_id);
+// ---------------------------------------------------------------------------
+// #868 – Covenant events
+// ---------------------------------------------------------------------------
+
+/// Emitted when a covenant is created for an invoice.
+pub fn covenant_created(env: &Env, invoice_id: u64, creator: &Address, penalty_amount: i128) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("rdm_xfr"), invoice_id),
-        (token_id, from.clone(), to.clone(), event_seq),
+        (symbol_short!("cov_crt"), invoice_id),
+        (creator.clone(), penalty_amount),
     );
 }
 
-/// Issue #869: Emitted when a redemption token is redeemed.
-/// Topics: (split, rdm_use, invoice_id)
-/// Data: (token_id, holder, claim_amount, event_seq)
-pub fn redemption_token_redeemed(
-    env: &Env,
-    invoice_id: u64,
-    token_id: u64,
-    holder: &Address,
-    claim_amount: i128,
-) {
-    let event_seq = next_seq(env, invoice_id);
+/// Emitted when a covenant is fulfilled (invoice released successfully).
+pub fn covenant_fulfilled(env: &Env, invoice_id: u64, creator: &Address) {
     env.events().publish(
-        (symbol_short!("split"), symbol_short!("rdm_use"), invoice_id),
-        (token_id, holder.clone(), claim_amount, event_seq),
+        (symbol_short!("cov_ful"), invoice_id),
+        creator.clone(),
+    );
+}
+
+/// Emitted when a covenant is violated and a penalty is applied.
+pub fn covenant_violated(env: &Env, invoice_id: u64, creator: &Address, penalty_amount: i128) {
+    env.events().publish(
+        (symbol_short!("cov_vio"), invoice_id),
+        (creator.clone(), penalty_amount),
     );
 }

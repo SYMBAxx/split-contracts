@@ -212,6 +212,10 @@ pub struct SignedPayment {
 // Invoice status
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Core invoice types
+// ---------------------------------------------------------------------------
+
 /// Status of an invoice lifecycle.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -2230,87 +2234,106 @@ pub struct Subscription {
     pub paused: bool,
 }
 
-/// Issue #872: Price tier for volume-based invoice pricing.
+// ---------------------------------------------------------------------------
+// #865 – Creator collateral system
+// ---------------------------------------------------------------------------
+
+/// Collateral deposited by a creator to back their invoices.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct InvoicePriceTier {
-    /// Minimum invoice amount to qualify for this tier.
-    pub min_amount: i128,
-    /// Discount in basis points (e.g. 500 = 5% discount).
-    pub discount_bps: u32,
+pub struct CreatorCollateral {
+    /// Address of the creator who deposited collateral.
+    pub creator: Address,
+    /// Token used for collateral (typically USDC).
+    pub token: Address,
+    /// Amount of collateral currently held.
+    pub amount: i128,
+    /// Amount of collateral that is currently locked (backing active invoices).
+    pub locked: i128,
 }
 
-/// Issue #872: Advanced pricing model for an invoice.
+// ---------------------------------------------------------------------------
+// #866 – Invoice rating-based discount tiers
+// ---------------------------------------------------------------------------
+
+/// Rating record for a creator based on completed invoices.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct InvoicePricingModel {
-    /// Base price in token units.
-    pub base_price: i128,
-    /// Volume-based discount tiers (sorted ascending by min_amount).
-    pub tiers: Vec<InvoicePriceTier>,
-    /// Optional surge multiplier in basis points (10_000 = 1x, 15_000 = 1.5x).
-    pub surge_bps: u32,
-    /// Whether surge pricing is currently active.
-    pub surge_active: bool,
+pub struct CreatorRating {
+    /// Address of the rated creator.
+    pub creator: Address,
+    /// Cumulative sum of all rating scores (1–5 per invoice).
+    pub total_score: u32,
+    /// Total number of ratings received.
+    pub count: u32,
 }
 
-/// Issue #870: Delegation record for a recipient's payout address.
+/// Discount tier applied when creating an invoice based on creator rating.
+///
+/// Average rating brackets → basis-point discount on the invoice total:
+/// - avg ≥ 4.5  → Tier1 (500 bps = 5 %)
+/// - avg ≥ 3.5  → Tier2 (300 bps = 3 %)
+/// - avg ≥ 2.5  → Tier3 (100 bps = 1 %)
+/// - avg < 2.5  → None  (0 %)
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DiscountTier {
+    None,
+    Tier1,
+    Tier2,
+    Tier3,
+}
+
+// ---------------------------------------------------------------------------
+// #867 – Smart invoice routing based on recipient performance
+// ---------------------------------------------------------------------------
+
+/// Tracks how well a recipient fulfils their obligations (on-time deliveries, etc.).
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct RecipientDelegation {
-    /// The address that will receive the payout on behalf of the original recipient.
-    pub delegate: Address,
-    /// Ledger timestamp when delegation was set.
-    pub set_at: u64,
-    /// Optional expiry timestamp; delegation expires after this time.
-    pub expires_at: Option<u64>,
-}
-
-/// Issue #870: Performance tracking for a recipient across invoices.
-#[contracttype]
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecipientPerformance {
-    /// Total number of invoices where this recipient was listed.
-    pub invoices_listed: u32,
-    /// Total amount received across all released invoices.
-    pub total_received: i128,
-    /// Number of invoices that were released (funded fully).
-    pub invoices_released: u32,
-    /// Number of invoices that were refunded (deadline missed).
-    pub invoices_refunded: u32,
+    /// Address of the recipient.
+    pub recipient: Address,
+    /// Number of invoices successfully completed (funds received).
+    pub completed: u32,
+    /// Number of invoices where the recipient was flagged (e.g. late/disputed).
+    pub flagged: u32,
+    /// Cumulative performance score (higher = better; incremented on completion,
+    /// decremented on flag).
+    pub score: i32,
 }
 
-/// Issue #871: Configuration for an invoice time-lock.
+/// Routing preference used when selecting recipients for a new invoice.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvoiceTimeLock {
-    /// Unix timestamp after which the locked actions are permitted.
-    pub unlock_at: u64,
-    /// Whether payments are blocked until unlock_at.
-    pub lock_payments: bool,
-    /// Whether release is blocked until unlock_at.
-    pub lock_release: bool,
-    /// Whether refund is blocked until unlock_at.
-    pub lock_refund: bool,
-    /// Who set the lock.
-    pub set_by: Address,
+#[derive(Clone, Debug, PartialEq)]
+pub enum RoutingStrategy {
+    /// Use recipients exactly as supplied (default behaviour).
+    Default,
+    /// Prefer recipients with the highest performance score.
+    PerformanceBased,
+    /// Exclude any recipient whose score is below the supplied threshold.
+    ThresholdBased,
 }
 
-/// Issue #869: A redemption token representing a claim on an invoice's
-/// funded amount, usable in secondary markets.
+// ---------------------------------------------------------------------------
+// #868 – Creator covenant system with penalties
+// ---------------------------------------------------------------------------
+
+/// A covenant (commitment) made by a creator when submitting an invoice.
+///
+/// If the creator violates the covenant (e.g. cancels funded invoice, misses
+/// delivery) a penalty is applied and deducted from their collateral.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct RedemptionToken {
-    /// The invoice this token is tied to.
+pub struct CreatorCovenant {
+    /// Invoice this covenant is attached to.
     pub invoice_id: u64,
-    /// The address that currently holds this redemption right.
-    pub holder: Address,
-    /// The amount of the invoice's funded pool this token represents.
-    pub claim_amount: i128,
-    /// Whether this token has been redeemed.
-    pub redeemed: bool,
-    /// Ledger timestamp when the token was issued.
-    pub issued_at: u64,
-    /// Optional expiry timestamp after which the token cannot be redeemed.
-    pub expires_at: Option<u64>,
+    /// Creator who made the commitment.
+    pub creator: Address,
+    /// Penalty amount (in stroops) slashed from collateral on violation.
+    pub penalty_amount: i128,
+    /// Whether the covenant has been violated.
+    pub violated: bool,
+    /// Whether the covenant was fulfilled (invoice released on time).
+    pub fulfilled: bool,
 }
