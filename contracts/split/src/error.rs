@@ -5,23 +5,41 @@ use soroban_sdk::contracterror;
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ContractError {
+    /// Caller is not authorized for this operation (missing admin/role/signer or wrong identity).
     NotAuthorized = 1,
+    /// The referenced invoice id does not exist in storage.
     InvoiceNotFound = 2,
+    /// The operation requires the invoice to still be open, but its deadline has already passed.
     DeadlinePassed = 3,
+    /// The invoice has already been fully funded and a further fund would over-fund it.
     AlreadyFunded = 4,
+    /// A supplied amount is non-positive, would overflow, or fails the invoice's amount rules.
     InvalidAmount = 5,
+    /// The invoice (or a related entity) is frozen and the requested mutation is disallowed.
     InvoiceFrozen = 6,
+    /// The invoice is not in a status that permits the requested operation.
     InvalidStatus = 7,
+    /// The caller is not in the invoice's allowed-payer set (or `allowed_payers` rejects them).
     PayerNotAllowed = 8,
+    /// The payment/fund amount is less than the remaining amount required to fund the invoice.
     FundingInsufficient = 9,
+    /// A call to an external oracle/price/dependency contract returned an error or aborted.
     OracleCallFailed = 10,
+    /// The caller is not the arbiter required to perform this dispute-related action.
     NotArbiter = 11,
+    /// The operation is only valid while the invoice is under dispute, but no dispute is active.
     NotDisputed = 12,
+    /// The action has already been executed and is not idempotent/retryable.
     AlreadyExecuted = 13,
+    /// A time-lock / vesting window has not yet elapsed; the operation must wait.
     TimelockPending = 14,
+    /// The contract is globally paused; all mutating entry points are blocked.
     ContractPaused = 15,
+    /// The recipient list is invalid (e.g. mismatched lengths of recipients/amounts/tokens).
     InvalidRecipients = 16,
+    /// A prerequisite (invoice, milestone, or dependency) that must be satisfied first is not met.
     PrerequisiteNotMet = 17,
+    /// The requested batch exceeds the maximum number of items permitted in a single call.
     BatchLimitExceeded = 18,
     /// Issue #330: Recipient has already been paid on this invoice.
     RecipientAlreadyPaid = 19,
@@ -32,8 +50,11 @@ pub enum ContractError {
     /// Oracle-priced invoice: the configured price oracle is unreachable or returned a
     /// non-positive rate at payment time.
     OracleUnavailable = 22,
+    /// Caller supplied a rating outside the valid range (e.g. 0, negative, or above the max score).
     InvalidRating = 23,
+    /// Caller attempted to rate the same target more than once.
     AlreadyRated = 24,
+    /// Caller exceeded the per-window rate limit for this operation.
     RateLimitExceeded = 25,
     /// Issue #438: Recipient reveal commitment does not match stored hash.
     RecipientRevealMismatch = 26,
@@ -118,7 +139,46 @@ pub enum ContractError {
     RecipientNotFound = 62,
     /// Issue #522: Parent chain depth exceeds the allowed maximum.
     ParentChainTooDeep = 63,
-    /// Issue #837: Invoice is locked (deadline passed or explicitly locked)
-    /// and can no longer be modified.
-    InvoiceLocked = 64,
+    /// Issue #564: Checkpoint index does not match stored value during payout recovery.
+    CheckpointMismatch = 64,
+    /// Issue #564: Recipient at this index has already been paid in a prior payout attempt.
+    AlreadyPaid = 65,
+    /// Recipient list is shorter than the configured minimum recipient count.
+    TooFewRecipients = 66,
+    /// Issue #747: Payment would push a payer's running total past the per-payer
+    /// contribution cap (`max_contribution_per_payer`) set on the invoice.
+    ContributionCapExceeded = 67,
+    /// Issue #746: Basis points value is out of the valid range (1–10 000).
+    InvalidBps = 68,
+    /// Issue #744: Batch size exceeds the hard cap of 20 invoices per call.
+    BatchTooLarge = 69,
+    /// Issue #745: The invoice has already been expired and all payers refunded.
+    InvoiceExpired = 70,
+    /// Issue #822: Payment priority level is outside the valid range (0–2).
+    InvalidPriority = 71,
+    /// Issue #825: The pending payment has not yet reached the required
+    /// number of confirmation ledgers.
+    ConfirmationPending = 72,
+    /// Issue #825: No pending payment exists for this payer and invoice.
+    NoPendingPayment = 73,
+    /// Issue #872: No pricing model is configured for this invoice.
+    NoPricingModel = 74,
+    /// Issue #872: Surge pricing is already in the requested state.
+    SurgeStateUnchanged = 75,
+    /// Issue #870: Delegation has expired.
+    DelegationExpired = 76,
+    /// Issue #870: No delegation exists for this recipient.
+    NoDelegation = 77,
+    /// Issue #871: An invoice time-lock is active and the action is not yet permitted.
+    TimeLockActive = 78,
+    /// Issue #871: No time-lock is configured on this invoice.
+    NoTimeLock = 79,
+    /// Issue #869: The redemption token does not exist.
+    RedemptionTokenNotFound = 80,
+    /// Issue #869: The redemption token has already been redeemed.
+    TokenAlreadyRedeemed = 81,
+    /// Issue #869: The redemption token has expired.
+    TokenExpired = 82,
+    /// Issue #869: Caller is not the current token holder.
+    NotTokenHolder = 83,
 }

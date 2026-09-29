@@ -1,31 +1,59 @@
+# Build artifacts
+target/
+*.wasm
+
+# Cargo lock (workspace-level managed separately; keep for reproducibility)
+# Cargo.lock  ← intentionally tracked for binary crates
+
+# Test snapshots (soroban / insta)
+**/*.snap
+**/*.snap.new
+snapshots/
+.snapshots/
+test_snapshots/
+**/test_snapshots/
+
+# Environment / secrets
+# ============================================================
 # Build output
+# ============================================================
 target/
 *.wasm
 wasm32-unknown-unknown/
 **/wasm32-unknown-unknown/
 
-# Environment files
+# ============================================================
+# Environment / secrets
+# ============================================================
 .env
 .env.local
 .env.*.local
 
-# OS files
+# OS artifacts
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Editor / IDE
 .vscode/
 .idea/
-*.log
-*.tmp
-*.bak
-test_snapshots/
-snapshots/
-**/snapshots/
+*.iml
 *.swp
 *.swo
 *~
 
-# Editor/IDE
+# Stellar CLI artifacts
+.stellar/
+
+# Misc
+*.bak
+*.orig
+# ============================================================
+# OS / editor artefacts
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
 .vscode/
 .idea/
 *.swp
@@ -34,43 +62,56 @@ snapshots/
 *.sublime-project
 *.sublime-workspace
 
-# Test snapshots
+# ============================================================
+# Test snapshots and generated test artefacts
+# ============================================================
 **/__snapshots__/
-*.snap
 **/test_snapshots/
+*.snap
+*.snap.orig
 *.snapshot
-**/snapshots/
 *.snap.bak
+tests/snapshots/
+tests/fixtures/
 
+# ============================================================
 # Stellar CLI
+# ============================================================
 .stellar/
 identity/
 .stellar-cli/
 
+# ============================================================
 # Logs
+# ============================================================
 *.log
 *.log.*
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# ============================================================
 # Coverage reports
+# ============================================================
 lcov.info
 tarpaulin-report.html
 coverage/
 .nyc_output/
 profdata/
 
+# ============================================================
 # Temporary files
+# ============================================================
 *.tmp
 *.bak
 *.orig
 *.rej
-*~
 .*.swp
 .*.swo
 
-# Node / JS tooling (if any frontend tooling is added)
+# ============================================================
+# Node / JS tooling (not used in this project, kept for safety)
+# ============================================================
 node_modules/
 dist/
 .pnp
@@ -81,21 +122,49 @@ dist/
 .parcel-cache/
 .cache/
 
+# ============================================================
 # Rust / Cargo artefacts not caught by target/
+# ============================================================
 **/*.rs.bk
 Cargo.lock.bak
 **/*.profraw
 **/*.profdata
 
-# Fuzz corpus (generated during fuzzing runs)
+# ============================================================
+# Fuzz corpus (generated during fuzzing runs — seed files are
+# committed via explicit !fuzz/corpus/<target>/seed_* rules)
+# ============================================================
 fuzz/corpus/*
-!fuzz/corpus/.gitkeep
+!fuzz/corpus/fuzz_sequence/seed_zeros
+!fuzz/corpus/fuzz_sequence/seed_empty
+!fuzz/corpus/fuzz_sequence/seed_mixed
+!fuzz/corpus/fuzz_sequence/seed_ones
+!fuzz/corpus/fuzz_create_invoice/seed_zeros
+!fuzz/corpus/fuzz_create_invoice/seed_empty
+!fuzz/corpus/fuzz_create_invoice/seed_mixed
+!fuzz/corpus/fuzz_create_invoice/seed_ones
+!fuzz/corpus/fuzz_pay/seed_zeros
+!fuzz/corpus/fuzz_pay/seed_empty
+!fuzz/corpus/fuzz_pay/seed_mixed
+!fuzz/corpus/fuzz_pay/seed_ones
+!fuzz/corpus/fuzz_refund/seed_zeros
+!fuzz/corpus/fuzz_refund/seed_empty
+!fuzz/corpus/fuzz_refund/seed_mixed
+!fuzz/corpus/fuzz_refund/seed_ones
+!fuzz/corpus/fuzz_release/seed_zeros
+!fuzz/corpus/fuzz_release/seed_empty
+!fuzz/corpus/fuzz_release/seed_mixed
+!fuzz/corpus/fuzz_release/seed_ones
 
-# Cargo audit / deny / outdated cache
+# ============================================================
+# Cargo audit / deny cache
+# ============================================================
 .cargo-ok
 cargo-audit.toml
 
+# ============================================================
 # Python / misc tooling
+# ============================================================
 __pycache__/
 *.pyc
 .pytest_cache/
