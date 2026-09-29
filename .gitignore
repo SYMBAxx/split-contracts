@@ -1,7 +1,39 @@
+# Build artifacts
 target/
-Cargo.lock
 *.wasm
+
+# Cargo lock (workspace-level managed separately; keep for reproducibility)
+# Cargo.lock  ← intentionally tracked for binary crates
+
+# Test snapshots (soroban / insta)
+**/*.snap
+**/*.snap.new
+snapshots/
+.snapshots/
+test_snapshots/
+**/test_snapshots/
+
+# Environment / secrets
 .env
 .env.local
+.env.*.local
+
+# OS artifacts
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# Stellar CLI artifacts
+.stellar/
+
+# Misc
+*.bak
+*.orig

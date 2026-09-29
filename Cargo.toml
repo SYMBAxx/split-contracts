@@ -3,7 +3,7 @@ members = ["contracts/split"]
 resolver = "2"
 
 [workspace.dependencies]
-soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+soroban-sdk = { version = "22.0.0" }
 
 [profile.release]
 opt-level = "z"
